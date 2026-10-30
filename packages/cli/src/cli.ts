@@ -1,0 +1,1233 @@
+import { PROJECT_STATIC_ROOT } from '@deepnote/cloud'
+import { DEFAULT_API_URL, DEFAULT_ENV_FILE, DEFAULT_INTEGRATIONS_FILE } from '@deepnote/database-integrations'
+import chalk from 'chalk'
+import { Command, Option } from 'commander'
+// Note: We keep 'chalk' import for:
+// 1. Welcome text (displayed before argument parsing, so we can't use getChalk())
+// 2. Setting chalk.level in preAction hook for backward compatibility
+import { createAnalyzeAction } from './commands/analyze'
+import { createBlockTypeValidator, createCatAction, FILTERABLE_BLOCK_TYPES } from './commands/cat'
+import { createConvertAction } from './commands/convert'
+import { createDagDownstreamAction, createDagShowAction, createDagVarsAction } from './commands/dag'
+import { createDiffAction } from './commands/diff'
+import { createInspectAction } from './commands/inspect'
+import { createInstallSkillsAction } from './commands/install-skills'
+import { createIntegrationsPullAction } from './commands/integrations'
+import { createIntegrationsAddAction } from './commands/integrations/add-integration'
+import { createIntegrationsEditAction } from './commands/integrations/edit-integration'
+import { createLintAction } from './commands/lint'
+import { createOpenAction } from './commands/open'
+import { createPublishAction } from './commands/publish'
+import { createRunAction } from './commands/run'
+import { createScheduleAction } from './commands/schedule'
+import { createSplitAction } from './commands/split'
+import { createStaticSiteAccessAction } from './commands/static-site-access'
+import { createStatsAction } from './commands/stats'
+import { createStreamlitPublishAction } from './commands/streamlit-publish'
+import { CONFLICT_MODES, createSyncAction, DEFAULT_SYNC_CONCURRENCY, parseSyncConcurrency } from './commands/sync'
+import { createValidateAction } from './commands/validate'
+import { generateCompletionScript } from './completions'
+import { DEEPNOTE_TOKEN_ENV } from './constants'
+import { ExitCode } from './exit-codes'
+import { getChalk, getOutputConfig, OUTPUT_FORMATS, output, setOutputConfig, shouldDisableColor } from './output'
+import { createFormatValidator, JSON_LLM_RESOLUTION, TOON_LLM_RESOLUTION } from './utils/format-validator'
+import { parseTimeoutSeconds } from './utils/parse-timeout'
+import { version } from './version'
+
+/**
+ * Global CLI options that apply to all commands.
+ */
+export interface GlobalOptions {
+  color: boolean
+  debug: boolean
+  quiet: boolean
+}
+
+/**
+ * Creates and configures the main CLI program.
+ */
+export function createProgram(): Command {
+  const program = new Command()
+
+  program
+    .name('deepnote')
+    .description(getWelcomeText())
+    .version(version, '-v, --version', 'Display the CLI version')
+    .helpOption('-h, --help', 'Display help information')
+    .showHelpAfterError(false)
+    .configureOutput({
+      // Write errors to stderr with chalk styling
+      outputError: (str, write) => write(chalk.red(str)),
+    })
+    .exitOverride(err => {
+      // Map Commander errors to appropriate exit codes
+      // Invalid values and missing required options are both invalid usage (2).
+      if (err.code === 'commander.invalidArgument' || err.code === 'commander.missingMandatoryOptionValue') {
+        process.exit(ExitCode.InvalidUsage)
+      }
+      // For other Commander errors, use the default exit code
+      process.exit(err.exitCode)
+    })
+    // Global options
+    .option('--no-color', 'Disable colored output (also respects NO_COLOR env var)')
+    .option('--debug', 'Show debug information for troubleshooting')
+    .option('-q, --quiet', 'Suppress non-essential output')
+    .hook('preAction', (thisCommand, _actionCommand) => {
+      const opts = thisCommand.opts<GlobalOptions>()
+
+      // Configure output based on global options
+      setOutputConfig({
+        color: opts.color && !shouldDisableColor(),
+        debug: opts.debug ?? false,
+        quiet: opts.quiet ?? false,
+      })
+
+      // Update chalk level if color is disabled
+      if (!getOutputConfig().color) {
+        chalk.level = 0
+      }
+    })
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Examples:')}
+  ${c.dim('# Sync your Deepnote workspace to a local directory (and push edits back)')}
+  $ deepnote sync workspace
+
+  ${c.dim('# Run the first .deepnote file in current directory')}
+  $ deepnote run
+
+  ${c.dim('# Inspect a specific .deepnote file')}
+  $ deepnote inspect my-project.deepnote
+
+  ${c.dim('# Run the first .deepnote file in a subdirectory')}
+  $ deepnote run notebooks/
+
+  ${c.dim('# Inspect with JSON output (for scripting)')}
+  $ deepnote inspect my-project.deepnote -o json
+
+  ${c.dim('# Display block contents')}
+  $ deepnote cat my-project.deepnote
+
+  ${c.dim('# Compare two .deepnote files')}
+  $ deepnote diff file1.deepnote file2.deepnote
+
+  ${c.dim('# Open a .deepnote file in Deepnote Cloud')}
+  $ deepnote open my-project.deepnote
+
+  ${c.dim('# Schedule a notebook to run daily in Deepnote Cloud')}
+  $ deepnote schedule my-project.deepnote --daily --at 09:00
+
+  ${c.dim('# Check for issues')}
+  $ deepnote lint my-project.deepnote
+
+  ${c.dim('# Show project statistics')}
+  $ deepnote stats my-project.deepnote
+
+  ${c.dim('# Pull integrations from Deepnote API')}
+  $ deepnote integrations pull
+
+  ${c.dim('# Get help for a specific command')}
+  $ deepnote help run
+
+  ${c.dim('# Generate shell completions')}
+  $ deepnote completion bash >> ~/.bashrc
+
+${c.bold('Global Options:')}
+  ${c.dim('--no-color')}    Disable colored output (respects NO_COLOR env var)
+  ${c.dim('--debug')}       Show debug information for troubleshooting
+  ${c.dim('-q, --quiet')}   Suppress non-essential output
+
+${c.bold('Environment Variables:')}
+  ${c.dim(DEEPNOTE_TOKEN_ENV)}  API token for cloud commands (sync, publish, schedule, run --cloud, ...);
+                  also read from a .env file. Create one under Settings & members > Security > API keys
+  ${c.dim('NO_COLOR')}        Set to any value to disable colored output
+  ${c.dim('FORCE_COLOR')}     Set to 1 to force colors, 0 to disable
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Success
+  ${c.dim('1')}  General error (runtime failures)
+  ${c.dim('2')}  Invalid usage (bad arguments, file not found)
+`
+    })
+
+  // Register all commands
+  registerCommands(program)
+
+  return program
+}
+
+/**
+ * Registers all available commands on the program.
+ */
+function registerCommands(program: Command): void {
+  // Inspect command - for inspecting and displaying .deepnote file metadata
+  program
+    .command('inspect')
+    .description('Inspect and display metadata from a .deepnote file')
+    .argument('[path]', 'Path to a .deepnote file or directory (defaults to current directory)')
+    .option(
+      '-o, --output <format>',
+      'Output format: json, toon, llm',
+      createFormatValidator(OUTPUT_FORMATS, TOON_LLM_RESOLUTION)
+    )
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Output:')}
+  Displays structured information about the .deepnote file including:
+  - File path and project name
+  - Project ID and file format version
+  - Creation, modification, and export timestamps
+  - Number of notebooks and total blocks
+  - List of notebooks with their block counts
+
+${getSmartFileDiscoveryHelp(c)}
+
+${c.bold('Examples:')}
+  ${c.dim('# Inspect first .deepnote file in current directory')}
+  $ deepnote inspect
+
+  ${c.dim('# Inspect a specific .deepnote file')}
+  $ deepnote inspect my-project.deepnote
+
+  ${c.dim('# Inspect first .deepnote file in a subdirectory')}
+  $ deepnote inspect notebooks/
+
+  ${c.dim('# Output as JSON for scripting')}
+  $ deepnote inspect my-project.deepnote -o json
+
+  ${c.dim('# Output as TOON for LLM consumption (30-60% fewer tokens)')}
+  $ deepnote inspect my-project.deepnote -o toon
+
+  ${c.dim('# Use with jq for specific fields')}
+  $ deepnote inspect my-project.deepnote -o json | jq '.project.name'
+`
+    })
+    .action(createInspectAction(program))
+
+  // Cat command - display block contents from a .deepnote file
+  program
+    .command('cat')
+    .description('Display block contents from a .deepnote file')
+    .argument('<path>', 'Path to a .deepnote file')
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .option('--notebook <name>', 'Show only blocks from the specified notebook')
+    .option('--type <type>', `Filter blocks by type (${FILTERABLE_BLOCK_TYPES.join(', ')})`, createBlockTypeValidator())
+    .option('--tree', 'Show structure only without block content')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Block Types:')}
+  ${c.dim('code')}        Python code blocks
+  ${c.dim('sql')}         SQL query blocks
+  ${c.dim('markdown')}    Markdown blocks
+  ${c.dim('text')}        All text cell blocks (h1, h2, h3, p, bullet, etc.)
+  ${c.dim('input')}       All input blocks (text, select, slider, etc.)
+
+${c.bold('Examples:')}
+  ${c.dim('# Display all blocks in a file')}
+  $ deepnote cat my-project.deepnote
+
+  ${c.dim('# Show only code blocks')}
+  $ deepnote cat my-project.deepnote --type code
+
+  ${c.dim('# Show blocks from a specific notebook')}
+  $ deepnote cat my-project.deepnote --notebook "Data Analysis"
+
+  ${c.dim('# Show structure without content (tree view)')}
+  $ deepnote cat my-project.deepnote --tree
+
+  ${c.dim('# Output as JSON for scripting')}
+  $ deepnote cat my-project.deepnote -o json
+
+  ${c.dim('# Combine filters')}
+  $ deepnote cat my-project.deepnote --notebook "Analysis" --type sql
+`
+    })
+    .action(createCatAction(program))
+
+  // Diff command - compare two .deepnote files
+  program
+    .command('diff')
+    .description('Compare two .deepnote files and show structural differences')
+    .argument('<path1>', 'Path to the first .deepnote file')
+    .argument('<path2>', 'Path to the second .deepnote file')
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .option('--content', 'Include content differences in output')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Output:')}
+  Shows structural differences between two .deepnote files:
+  - Added, removed, and modified notebooks
+  - Added, removed, and modified blocks within notebooks
+  - Summary of total changes
+
+${c.bold('Examples:')}
+  ${c.dim('# Compare two .deepnote files')}
+  $ deepnote diff original.deepnote modified.deepnote
+
+  ${c.dim('# Compare with content differences')}
+  $ deepnote diff file1.deepnote file2.deepnote --content
+
+  ${c.dim('# Output as JSON for scripting')}
+  $ deepnote diff file1.deepnote file2.deepnote -o json
+
+  ${c.dim('# Compare a file with a snapshot')}
+  $ deepnote diff current.deepnote backup.snapshot.deepnote
+`
+    })
+    .action(createDiffAction(program))
+
+  // Run command - execute notebook files
+  program
+    .command('run')
+    .description('Run a notebook file (.deepnote, .ipynb, .py, .qmd)')
+    .argument('[path]', 'Path to a notebook file (.deepnote, .ipynb, .py, .qmd)')
+    .option('--python <path>', 'Path to Python (executable, bin directory, or venv root)')
+    .option('--cwd <path>', 'Working directory for execution (defaults to file directory)')
+    .option(
+      '--startup-timeout <seconds>',
+      'Seconds to allow each of the toolkit server and the kernel to become ready (defaults 120 and 30)',
+      parseTimeoutSeconds
+    )
+    .option(
+      '--block-timeout <seconds>',
+      'Interrupt a block and fail the run if it executes longer than this (local runs only)',
+      parseTimeoutSeconds
+    )
+    .option('--notebook <name>', 'Run only the specified notebook')
+    .option('--block <id>', 'Run only the specified block')
+    .option(
+      '-i, --input <key=value>',
+      'Set an input block value (repeatable; use JSON string arrays for multi-value inputs)',
+      (val, prev: string[]) => {
+        prev.push(val)
+        return prev
+      },
+      []
+    )
+    .option('--list-inputs', 'List all input variables in the notebook without running')
+    .option(
+      '-o, --output <format>',
+      'Output format: json, toon, llm',
+      createFormatValidator(OUTPUT_FORMATS, TOON_LLM_RESOLUTION)
+    )
+    .option('--dry-run', 'Show what would be executed without running')
+    .option('--top', 'Display resource usage (CPU, memory) during execution')
+    .option('--profile', 'Show per-block timing and memory usage')
+    .option('--open', 'Open the project in Deepnote Cloud after successful execution')
+    .option('--context', 'Include analysis context in machine-readable output (requires -o json/toon/llm)')
+    .option('--prompt <text>', 'Run an LLM agent block with the given prompt')
+    .option('--url <url>', 'API base URL (for integrations and cloud runs)', DEFAULT_API_URL)
+    .option('--token <token>', `Bearer token for the Deepnote API (or use ${DEEPNOTE_TOKEN_ENV} env var)`)
+    .option('--cloud', 'Run the notebook in Deepnote Cloud, then download the resulting snapshot locally')
+    .option('--notebook-id <uuid>', 'Cloud notebook id to run (with --cloud); alternative to a local .deepnote file')
+    .option('--out <path>', 'Write the downloaded cloud snapshot to this exact path (with --cloud)')
+    .addOption(
+      new Option('--storage-mode <mode>', 'Project-storage access for a detached cloud run').choices([
+        'read-write',
+        'readonly',
+      ])
+    )
+    .option(
+      '--timeout <seconds>',
+      'Max seconds to wait for a cloud run to finish (with --cloud, default 600)',
+      parseTimeoutSeconds
+    )
+    .option(
+      '--push',
+      'Push the local .deepnote blocks to the Deepnote notebook before running (deletes cloud blocks the file does not have)'
+    )
+    .option('--yes', 'Skip the --push confirmation prompt')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Supported Formats:')}
+  ${c.dim('.deepnote')}  Deepnote project (native)
+  ${c.dim('.ipynb')}     Jupyter Notebook (auto-converted)
+  ${c.dim('.py')}        Percent format (# %%) or Marimo (@app.cell)
+  ${c.dim('.qmd')}       Quarto document (auto-converted)
+
+${c.bold('Examples:')}
+  ${c.dim('# Run a Jupyter notebook directly (auto-converts)')}
+  $ deepnote run notebook.ipynb
+
+  ${c.dim('# Run a .deepnote file')}
+  $ deepnote run my-project.deepnote
+
+  ${c.dim('# Run a percent format Python file')}
+  $ deepnote run analysis.py
+
+  ${c.dim('# Run and open in Deepnote Cloud after execution')}
+  $ deepnote run notebook.ipynb --open
+
+  ${c.dim('# Run an existing notebook in Deepnote Cloud and download its snapshot')}
+  $ deepnote run --cloud --notebook-id 0f1e2d3c-4b5a-6789-abcd-ef0123456789
+
+  ${c.dim('# Run a .deepnote (notebook id read from the file) in the cloud, with inputs')}
+  $ deepnote run my-project.deepnote --cloud --input name="Alice"
+
+  ${c.dim('# Push local edits to the Deepnote notebook first, then run what is on disk')}
+  $ deepnote run my-project.deepnote --cloud --push
+
+  ${c.dim('# Preview what --push would change without sending or running anything')}
+  $ deepnote run my-project.deepnote --cloud --push --dry-run
+
+  ${c.dim('# Run with a specific Python virtual environment')}
+  $ deepnote run my-project.deepnote --python path/to/venv
+
+  ${c.dim('# Fail fast in CI: 60s for the runtime to start, 5 minutes per block, machine-readable result')}
+  $ deepnote run my-project.deepnote --startup-timeout 60 --block-timeout 300 -o json
+
+  ${c.dim('# Show the toolkit server log while running')}
+  $ deepnote --debug run my-project.deepnote
+
+  ${c.dim('# Run only a specific notebook')}
+  $ deepnote run my-project.deepnote --notebook "Data Analysis"
+
+  ${c.dim('# Run only a specific block')}
+  $ deepnote run my-project.deepnote --block abc123
+
+  ${c.dim('# List input variables needed by the notebook')}
+  $ deepnote run my-project.deepnote --list-inputs
+
+  ${c.dim('# Set input values for input blocks')}
+  $ deepnote run my-project.deepnote --input name="Alice" --input count=42
+
+  ${c.dim('# Monitor resource usage during execution')}
+  $ deepnote run my-project.deepnote --top
+
+  ${c.dim('# Profile blocks to identify slow/memory-intensive operations')}
+  $ deepnote run my-project.deepnote --profile
+
+  ${c.dim('# Output results as JSON for CI/CD pipelines')}
+  $ deepnote run my-project.deepnote -o json
+
+  ${c.dim('# Preview what would be executed without running')}
+  $ deepnote run my-project.deepnote --dry-run
+
+  ${c.dim('# Run an LLM agent with a prompt (appends to existing file)')}
+  $ deepnote run my-project.deepnote --prompt "Analyze the data"
+
+  ${c.dim('# Run an LLM agent standalone (no file needed)')}
+  $ deepnote run --prompt "Write a hello world script"
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Success
+  ${c.dim('1')}  Runtime error (code execution failed)
+  ${c.dim('2')}  Invalid usage (missing file, bad arguments, missing required inputs)
+`
+    })
+    .action(createRunAction(program))
+
+  // Open command - open a .deepnote file in deepnote.com
+  program
+    .command('open')
+    .description('Open a .deepnote file in Deepnote Cloud')
+    .argument('<path>', 'Path to a .deepnote file to open')
+    .option('--domain <domain>', 'Deepnote domain (defaults to deepnote.com)')
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Description:')}
+  Uploads the .deepnote file to Deepnote and opens it in your default browser.
+  This is useful for quickly viewing or editing your local notebooks in Deepnote.
+  Note: Files must be under 100 MB.
+
+${c.bold('Output:')}
+  On success, displays a confirmation message and the URL.
+  The URL can be shared with others to view the notebook.
+
+${c.bold('Examples:')}
+  ${c.dim('# Open a .deepnote file in Deepnote')}
+  $ deepnote open my-project.deepnote
+
+  ${c.dim('# Open with JSON output (for scripting)')}
+  $ deepnote open my-project.deepnote -o json
+
+  ${c.dim('# Use a custom domain (e.g., single-tenants)')}
+  $ deepnote open my-project.deepnote --domain deepnote.example.com
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Success
+  ${c.dim('1')}  Import error (upload or network failure)
+  ${c.dim('2')}  Invalid usage (file not found, not a .deepnote file, file too large)
+`
+    })
+    .action(createOpenAction(program))
+
+  // Schedule command - install a recurring Deepnote Cloud run for a local notebook
+  program
+    .command('schedule')
+    .description('Schedule recurring notebook runs in Deepnote Cloud')
+    .argument('<path>', 'Path to a .deepnote file to schedule')
+    .option('--hourly', 'Run every hour (at the current minute unless --at sets one)')
+    .option('--daily', 'Run every day')
+    .option('--weekly <day>', 'Run weekly on a weekday, for example Monday')
+    .option('--monthly <day>', 'Run monthly on a day from 1 to 31')
+    .option('--cron <expression>', 'Use a custom five-field cron expression')
+    .option('--at <time>', 'Time for daily, weekly, or monthly schedules, or the minute for --hourly (defaults to now)')
+    .option('--timezone <timezone>', 'IANA timezone (defaults to the local system timezone)')
+    .option('--notebook <name>', 'Schedule a specific notebook in a multi-notebook file')
+    .option('--token <token>', `Deepnote API token (defaults to ${DEEPNOTE_TOKEN_ENV})`)
+    .option('--url <url>', 'Deepnote API base URL', DEFAULT_API_URL)
+    .option('--no-create', 'Do not create the project in Deepnote Cloud when it is missing')
+    .option('--open', 'Open the scheduled notebook in your default browser')
+    .option('--remove', "Remove the notebook's schedule")
+    .option('-o, --output <format>', 'Output format: json', createFormatValidator(['json']))
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Description:')}
+  Creates or updates the recurring Deepnote Cloud schedule for the selected notebook.
+  Other notebooks' schedules are not affected.
+  If the local project is not in Deepnote yet, it is created without running it.
+  Use --remove to delete the schedule instead.
+
+${c.bold('Examples:')}
+  ${c.dim('# Run every day at 09:00 in your local timezone')}
+  $ deepnote schedule report.deepnote --daily
+
+  ${c.dim('# Run every Monday at 08:30 in London')}
+  $ deepnote schedule report.deepnote --weekly Monday --at 08:30 --timezone Europe/London
+
+  ${c.dim('# Schedule one notebook from a multi-notebook project')}
+  $ deepnote schedule project.deepnote --notebook "Daily report" --daily
+
+  ${c.dim('# Use a custom cron expression and print machine-readable output')}
+  $ deepnote schedule report.deepnote --cron "0 6 * * 1-5" --timezone UTC -o json
+
+  ${c.dim('# Schedule and open the cloud notebook')}
+  $ deepnote schedule report.deepnote --daily --open
+
+  ${c.dim("# Remove one notebook's schedule")}
+  $ deepnote schedule project.deepnote --notebook "Daily report" --remove
+
+${c.bold('Authentication:')}
+  Set ${c.dim(DEEPNOTE_TOKEN_ENV)} in your environment or in a .env file next to the notebook.
+  You can also pass ${c.dim('--token')}. Scheduling availability depends on your Deepnote plan;
+  --remove works on any plan.
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Success, including --remove with nothing to remove
+  ${c.dim('1')}  API or network failure
+  ${c.dim('2')}  Invalid usage, authentication, or plan permissions
+`
+    })
+    .action(createScheduleAction(program))
+
+  // Sync command - mirror workspace projects to the local filesystem, both directions
+  program
+    .command('sync')
+    .description('Sync Deepnote projects with a local directory (pull and push .deepnote files)')
+    .argument('[dir]', 'Directory to sync into (defaults to current directory)')
+    .option('--url <url>', 'API base URL', DEFAULT_API_URL)
+    .option('--token <token>', `Bearer token for the Deepnote API (or use ${DEEPNOTE_TOKEN_ENV} env var)`)
+    .option('--all-files', "Also sync each project's working-directory files (download on pull, upload on push)")
+    .addOption(
+      new Option(
+        '--on-conflict <mode>',
+        'What to do when a project changed both locally and in the cloud: ask (default), skip, or override'
+      ).choices(CONFLICT_MODES)
+    )
+    .option('--delete-missing-notebooks', 'When pushing, delete cloud notebooks that were removed from the local file')
+    .option('--prune', 'Delete local files for projects (and files) that no longer exist in the cloud')
+    .option('--dry-run', 'Show what would be synced without writing anything')
+    .option('--concurrency <n>', 'How many projects to sync at once', parseSyncConcurrency, DEFAULT_SYNC_CONCURRENCY)
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Description:')}
+  Mirrors your workspace to a local directory: every project becomes a
+  directory <folder path>/<project name>/ holding one .deepnote file per
+  notebook, following the workspace folder tree. Sync state lives in
+  .deepnote-sync.json next to the files — projects are tracked by id, so
+  renames are handled as directory moves.
+
+  Both directions work. Pull writes the exported documents down; push is the
+  exact inverse — a project changed only locally is re-uploaded as the same
+  documents, with lost-update protection.
+
+${c.bold('Conflicts:')}
+  A project edited both locally and in the cloud is a conflict. By default
+  sync asks per project whether to keep the cloud version (overwriting local
+  changes) or skip; --on-conflict skip/override answers up front. Without a
+  terminal (CI, piped output), conflicts are skipped.
+
+${c.bold('What sync does not do:')}
+  - It never creates or deletes cloud projects; .deepnote files outside
+    tracked project directories are reported and left alone.
+  - Pulls remove tracked .deepnote files absent from the cloud export. Missing
+    project directories and working files are deleted only with --prune.
+  - Cloud notebooks are deleted on push only with --delete-missing-notebooks.
+  - --prune refuses to run when none of the tracked project ids match the
+    listed workspace; verify the API token and --url before retrying.
+  - It does not run git. Commit, branch, and push yourself.
+
+${c.bold('Examples:')}
+  ${c.dim('# Mirror the whole workspace into ./workspace')}
+  $ deepnote sync workspace
+
+  ${c.dim('# Also download working-directory files (data, requirements.txt, …)')}
+  $ deepnote sync workspace --all-files
+
+  ${c.dim('# Non-interactive: skip anything conflicting (good for cron/CI)')}
+  $ deepnote sync workspace --on-conflict skip
+
+  ${c.dim('# Preview without writing')}
+  $ deepnote sync workspace --dry-run
+
+  ${c.dim('# Machine-readable summary')}
+  $ deepnote sync workspace -o json
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Success (skipped conflicts are reported but do not fail the sync)
+  ${c.dim('1')}  One or more projects failed to sync
+  ${c.dim('2')}  Invalid usage (missing token, bad arguments)
+`
+    })
+    .action(createSyncAction(program))
+
+  program
+    .command('publish')
+    .description('Publish a local app directory to a Deepnote project')
+    .argument('<dir>', 'Directory containing the app files to publish')
+    .requiredOption('--project-id <uuid>', 'Deepnote project ID to publish to')
+    .option('--url <url>', 'API base URL', DEFAULT_API_URL)
+    .option('--token <token>', `Bearer token for the Deepnote API (or use ${DEEPNOTE_TOKEN_ENV} env var)`)
+    .option('--path <prefix>', `Target directory under ${PROJECT_STATIC_ROOT}`, PROJECT_STATIC_ROOT)
+    .addOption(
+      new Option('--api-access <state>', 'Allow the published app to call Deepnote APIs').choices([
+        'enabled',
+        'disabled',
+      ])
+    )
+    .option('--prune', 'Delete remote files below --path that are absent locally')
+    .option('--sync-root <dir>', 'Sync workspace whose mirror to update (default: search upwards from <dir>)')
+    .option('--no-sync-root', 'Publish without looking for or updating a sync workspace')
+    .option('--force', 'Publish even when files changed in Deepnote since the sync workspace last synced')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Apps:')}
+  Apps are HTML, CSS, and JavaScript hosted by Deepnote and run in the browser. They can be
+  interactive and call Deepnote APIs. The command uploads a local build directory to
+  ${c.dim('_deepnote_static/')}, replaces matching files, and enables sharing after every upload
+  succeeds. API access is left unchanged unless explicitly set. To serve a Python file already
+  in the project as a Streamlit app, use ${c.dim('deepnote streamlit publish')} instead.
+
+${c.bold('App viewer API access:')}
+  With API access enabled, the embedded app uses a viewer token that expires after
+  15 minutes. It can read notebook inputs and block metadata (no source) and start detached
+  runs in the hosting project or other projects in the same workspace where the viewer has
+  direct access. Runs in other projects also require execute permission. It can poll the
+  viewer's own runs for ${c.dim('snapshotBlocks')}. Every other endpoint answers 403, so features
+  built against a local preview with a personal token can fail when embedded.
+  Gate those paths on an ${c.dim('isEmbedded')} check (${c.dim('window !== window.parent')}): skip or hide them
+  when embedded, and surface a 403 instead of swallowing it.
+  Details: ${c.underline('https://github.com/deepnote/deepnote/blob/main/docs/deepnote-cli-publish.md')}
+
+${c.bold('Working with deepnote sync:')}
+  ${c.dim('_deepnote_static/')} is part of the same project file store that
+  ${c.dim('deepnote sync --all-files')} mirrors, so both commands write it. When the published
+  directory sits inside a synced workspace, publish updates that workspace's mirror and
+  manifest too, so sync sees the deploy as already in step instead of as drift.
+
+  If files below ${c.dim('--path')} changed in Deepnote since the workspace last recorded them
+  (an ${c.dim('--all-files')} sync or an earlier publish), publish stops rather than destroying
+  content the mirror does not hold — pull first, or pass ${c.dim('--force')}.
+  Use ${c.dim('--no-sync-root')} for a deploy that should ignore any workspace.
+
+${c.bold('Examples:')}
+  ${c.dim('# Publish a build directory to a project')}
+  $ deepnote publish ./dist --project-id 0f1e2d3c-4b5a-6789-abcd-ef0123456789
+
+  ${c.dim('# Publish with an explicit token')}
+  $ deepnote publish ./build --project-id <uuid> --token <token>
+
+  ${c.dim('# Publish to a custom path prefix')}
+  $ deepnote publish ./out --project-id <uuid> --path _deepnote_static/v2
+
+  ${c.dim('# Let the published app call Deepnote APIs')}
+  $ deepnote publish ./dist --project-id <uuid> --api-access enabled
+
+  ${c.dim('# Remove remote files that are no longer in the local build')}
+  $ deepnote publish ./dist --project-id <uuid> --prune
+
+  ${c.dim('# Quiet mode (no progress output)')}
+  $ deepnote publish ./dist --project-id <uuid> -q
+
+  ${c.dim('# CI deploy: never touch a sync workspace')}
+  $ deepnote publish ./dist --project-id <uuid> --no-sync-root
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Files uploaded and app sharing enabled
+  ${c.dim('1')}  Upload, pruning, or settings update failed, or Deepnote holds unsynced changes
+  ${c.dim('2')}  Invalid usage (bad path, directory not found, missing token, bad --sync-root)
+`
+    })
+    .action(createPublishAction(program))
+
+  const staticSite = program.command('static-site').description('Manage a published app')
+
+  staticSite
+    .command('access')
+    .description('Change app sharing and viewer API access without changing files')
+    .requiredOption('--project-id <uuid>', 'Deepnote project ID')
+    .option('--url <url>', 'API base URL', DEFAULT_API_URL)
+    .option('--token <token>', `Bearer token for the Deepnote API (or use ${DEEPNOTE_TOKEN_ENV} env var)`)
+    .addOption(
+      new Option('--sharing <state>', 'Make the app available to project viewers').choices(['enabled', 'disabled'])
+    )
+    .addOption(
+      new Option('--api-access <state>', 'Allow the app to call Deepnote APIs').choices(['enabled', 'disabled'])
+    )
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Description:')}
+  Changes access settings only. It does not upload, delete, or otherwise modify files below
+  ${c.dim('_deepnote_static/')}. Disabling sharing also disables viewer API access. Re-enabling
+  sharing later serves the files already stored in the project.
+
+${c.bold('Examples:')}
+  ${c.dim('# Stop serving the app without deleting its files')}
+  $ deepnote static-site access --project-id <uuid> --sharing disabled
+
+  ${c.dim('# Share the existing app and allow viewer-scoped API calls')}
+  $ deepnote static-site access --project-id <uuid> --sharing enabled --api-access enabled
+
+  ${c.dim('# Revoke viewer API access while preserving the current sharing setting')}
+  $ deepnote static-site access --project-id <uuid> --api-access disabled
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Access settings updated
+  ${c.dim('1')}  Project settings update failed
+  ${c.dim('2')}  Invalid usage (missing token, no setting, or contradictory settings)
+`
+    })
+    .action(createStaticSiteAccessAction(program))
+
+  const streamlit = program.command('streamlit').description('Manage Streamlit apps')
+
+  streamlit
+    .command('publish')
+    .description('Serve a file already in the project as a Streamlit app')
+    .argument('<entrypoint>', 'Project-relative path of the Python file to serve')
+    .requiredOption('--project-id <uuid>', 'Deepnote project ID')
+    .option('--url <url>', 'API base URL', DEFAULT_API_URL)
+    .option('--token <token>', `Bearer token for the Deepnote API (or use ${DEEPNOTE_TOKEN_ENV} env var)`)
+    .option('--no-wait', 'Exit without waiting for the app to start')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Description:')}
+  Streamlit apps are Python UIs that run on project hardware. <entrypoint> is a Python file
+  already in the project's Files. Upload it in Deepnote, or push it with
+  ${c.dim('deepnote sync --all-files')} alongside a notebook push. Nothing is uploaded and no app
+  setting changes.
+  Creating a Streamlit app restarts the project machine and interrupts active work. The command
+  waits up to 10 minutes for readiness, including when it finds an existing Streamlit app.
+  Use --no-wait to return without checking readiness.
+
+${c.bold('Examples:')}
+  ${c.dim('# Serve a file already in the project as a Streamlit app and wait for it to start')}
+  $ deepnote streamlit publish apps/dashboard.py --project-id <uuid>
+
+  ${c.dim('# Create the Streamlit app without waiting for the machine to restart')}
+  $ deepnote streamlit publish apps/dashboard.py --project-id <uuid> --no-wait
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  Streamlit app running, or created/found with --no-wait
+  ${c.dim('1')}  A Streamlit app request failed, or the app did not start in time
+  ${c.dim('2')}  Invalid usage (bad entrypoint, missing token)
+`
+    })
+    .action(createStreamlitPublishAction(program))
+
+  // Convert command - convert between notebook formats
+  program
+    .command('convert')
+    .description('Convert between notebook formats (.ipynb, .qmd, .py, .deepnote)')
+    .argument('<path>', 'Path to a file or directory to convert')
+    .option('-o, --output <path>', 'Output path (file or directory)')
+    .option('-n, --name <name>', 'Project name (for conversions to .deepnote)')
+    .option(
+      '-f, --format <format>',
+      'Output format when converting from .deepnote (jupyter, percent, quarto, marimo)',
+      'jupyter'
+    )
+    .option('--open', 'Open the converted .deepnote file in Deepnote Cloud')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Supported Formats:')}
+  ${c.dim('.ipynb')}     Jupyter Notebook
+  ${c.dim('.qmd')}       Quarto document
+  ${c.dim('.py')}        Percent format (# %%) or Marimo (@app.cell)
+  ${c.dim('.deepnote')}  Deepnote project
+
+${c.bold('Conversion Directions:')}
+  ${c.dim('To Deepnote:')}   .ipynb, .qmd, .py → .deepnote
+  ${c.dim('From Deepnote:')} .deepnote → .ipynb, .qmd, .py (percent/marimo)
+
+${c.bold('Examples:')}
+  ${c.dim('# Convert Jupyter notebook to Deepnote')}
+  $ deepnote convert notebook.ipynb
+
+  ${c.dim('# Convert and open in Deepnote Cloud')}
+  $ deepnote convert notebook.ipynb --open
+
+  ${c.dim('# Convert directory of notebooks')}
+  $ deepnote convert ./notebooks/
+
+  ${c.dim('# Convert with custom output path')}
+  $ deepnote convert notebook.ipynb -o my-project.deepnote
+
+  ${c.dim('# Convert with custom project name')}
+  $ deepnote convert notebook.ipynb -n "My Analysis"
+
+  ${c.dim('# Convert Deepnote to Jupyter')}
+  $ deepnote convert project.deepnote
+
+  ${c.dim('# Convert Deepnote to Quarto')}
+  $ deepnote convert project.deepnote -f quarto
+
+  ${c.dim('# Convert Deepnote to Marimo')}
+  $ deepnote convert project.deepnote -f marimo
+`
+    })
+    .action(createConvertAction(program))
+
+  // Split command - split multi-notebook files into separate files
+  program
+    .command('split')
+    .description('Split a multi-notebook .deepnote file into separate single-notebook files')
+    .argument('<path>', 'Path to a multi-notebook .deepnote file')
+    .option('-o, --output <dir>', 'Output directory for split files (default: same directory as input)')
+    .option('--force', 'Overwrite existing output files')
+    .action(createSplitAction(program))
+
+  // Validate command - validate a .deepnote file against the schema
+  program
+    .command('validate')
+    .description('Validate a .deepnote file against the schema')
+    .argument('<path>', 'Path to a .deepnote file to validate')
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Output:')}
+  Reports whether the .deepnote file is valid and lists any schema violations.
+  Uses the Zod schemas from @deepnote/blocks to validate the file structure.
+
+${c.bold('Exit Codes:')}
+  ${c.dim('0')}  File is valid
+  ${c.dim('1')}  Runtime error (unexpected failure)
+  ${c.dim('2')}  File is invalid (schema violations) or invalid usage (file not found, not a .deepnote file)
+
+${c.bold('Examples:')}
+  ${c.dim('# Validate a .deepnote file')}
+  $ deepnote validate my-project.deepnote
+
+  ${c.dim('# Validate with JSON output for CI/CD')}
+  $ deepnote validate my-project.deepnote -o json
+
+  ${c.dim('# Validate and check exit code in scripts')}
+  $ deepnote validate my-project.deepnote && echo "Valid!"
+
+  ${c.dim('# Parse JSON output with jq')}
+  $ deepnote validate my-project.deepnote -o json | jq '.valid'
+`
+    })
+    .action(createValidateAction(program))
+
+  // DAG command - analyze block dependencies
+  const dagCmd = program
+    .command('dag')
+    .description('Analyze block dependencies and variable flow')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Subcommands:')}
+  show        Show the dependency graph between blocks
+  vars        List variables defined and used by each block
+  downstream  Show blocks that need re-run if a block changes
+
+${c.bold('Output Formats:')}
+  -o, --output json   Output as JSON for scripting
+  -o, --output dot    Output as DOT format for Graphviz visualization
+
+${c.bold('Examples:')}
+  ${c.dim('# Show the dependency graph')}
+  $ deepnote dag show my-project.deepnote
+
+  ${c.dim('# List variables for each block')}
+  $ deepnote dag vars my-project.deepnote
+
+  ${c.dim('# Show what needs re-run if a block changes')}
+  $ deepnote dag downstream my-project.deepnote --block "Load Data"
+
+  ${c.dim('# Generate Graphviz visualization')}
+  $ deepnote dag show my-project.deepnote -o dot | dot -Tpng -o deps.png
+
+  ${c.dim('# Analyze only a specific notebook')}
+  $ deepnote dag show my-project.deepnote --notebook "Analysis"
+`
+    })
+
+  dagCmd
+    .command('show')
+    .description('Show the dependency graph between blocks')
+    .argument('<path>', 'Path to a .deepnote file')
+    .option(
+      '-o, --output <format>',
+      'Output format: json, dot, llm',
+      createFormatValidator(['json', 'dot'], JSON_LLM_RESOLUTION)
+    )
+    .option('--notebook <name>', 'Analyze only a specific notebook')
+    .option('--python <path>', 'Path to Python interpreter')
+    .action(createDagShowAction(program))
+
+  dagCmd
+    .command('vars')
+    .description('List variables defined and used by each block')
+    .argument('<path>', 'Path to a .deepnote file')
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .option('--notebook <name>', 'Analyze only a specific notebook')
+    .option('--python <path>', 'Path to Python interpreter')
+    .action(createDagVarsAction(program))
+
+  dagCmd
+    .command('downstream')
+    .description('Show blocks that need re-run if a block changes')
+    .argument('<path>', 'Path to a .deepnote file')
+    .requiredOption('-b, --block <id>', 'Block ID or label to analyze')
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .option('--notebook <name>', 'Analyze only a specific notebook')
+    .option('--python <path>', 'Path to Python interpreter')
+    .action(createDagDownstreamAction(program))
+
+  // Stats command - show project statistics
+  program
+    .command('stats')
+    .description('Show statistics about a .deepnote file')
+    .argument('<path>', 'Path to a .deepnote file')
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .option('--notebook <name>', 'Analyze only a specific notebook')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Output:')}
+  Displays statistics about the project including:
+  - Total notebooks, blocks, and lines of code
+  - Block types breakdown with counts
+  - Imported modules list
+  - Per-notebook breakdown
+
+${c.bold('Examples:')}
+  ${c.dim('# Show project statistics')}
+  $ deepnote stats my-project.deepnote
+
+  ${c.dim('# Output as JSON for scripting')}
+  $ deepnote stats my-project.deepnote -o json
+
+  ${c.dim('# Show stats for a specific notebook')}
+  $ deepnote stats my-project.deepnote --notebook "Data Analysis"
+`
+    })
+    .action(createStatsAction(program))
+
+  // Analyze command - comprehensive project analysis
+  program
+    .command('analyze')
+    .description('Analyze a .deepnote file for quality, structure, and dependencies')
+    .argument('<path>', 'Path to a .deepnote file')
+    .option(
+      '-o, --output <format>',
+      'Output format: json, toon, llm',
+      createFormatValidator(OUTPUT_FORMATS, TOON_LLM_RESOLUTION)
+    )
+    .option('--notebook <name>', 'Analyze only a specific notebook')
+    .option('--python <path>', 'Path to Python interpreter')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Output:')}
+  Provides comprehensive analysis including:
+  - Quality score (0-100) based on errors and warnings
+  - Project structure (entry/exit points, longest chain)
+  - Dependency analysis (imports, missing integrations)
+  - Actionable suggestions for improvement
+
+${c.bold('Examples:')}
+  ${c.dim('# Analyze a project')}
+  $ deepnote analyze my-project.deepnote
+
+  ${c.dim('# Output for LLM consumption')}
+  $ deepnote analyze my-project.deepnote -o toon
+
+  ${c.dim('# Analyze only a specific notebook')}
+  $ deepnote analyze my-project.deepnote --notebook Main
+`
+    })
+    .action(createAnalyzeAction(program))
+
+  // Lint command - check for issues
+  program
+    .command('lint')
+    .description('Check a .deepnote file or integrations yaml file for issues')
+    .argument('[path]', `Path to a .deepnote file or ${DEFAULT_INTEGRATIONS_FILE} (defaults to current directory)`)
+    .option('-o, --output <format>', 'Output format: json, llm', createFormatValidator(['json'], JSON_LLM_RESOLUTION))
+    .option('--notebook <name>', 'Lint only a specific notebook')
+    .option('--python <path>', 'Path to Python interpreter')
+    .option(
+      '--integrations-file <path>',
+      `Path to integrations env file (default: ${DEFAULT_INTEGRATIONS_FILE} next to .deepnote file)`
+    )
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Checks:')}
+  ${c.underline('Variables')}
+  - undefined-variable: Variables used but never defined
+  - circular-dependency: Blocks with circular dependencies
+  - unused-variable: Variables defined but never used
+  - shadowed-variable: Variables that shadow previous definitions
+  - parse-error: Blocks that failed to parse
+
+  ${c.underline('Integrations')}
+  - missing-integration: SQL blocks using integrations that are not configured
+  - configuration errors in ${DEFAULT_INTEGRATIONS_FILE} (YAML syntax, schema, missing env vars)
+
+  ${c.underline('Inputs')}
+  - missing-input: Input blocks without default values
+
+${c.bold('Integrations File:')}
+  Integrations are automatically loaded from ${DEFAULT_INTEGRATIONS_FILE} in the same directory as the
+  .deepnote file (or from --integrations-file if specified). This allows the lint command to detect
+  which SQL integrations are properly configured and report configuration errors explicitly.
+
+  You can also lint an integrations yaml file directly by passing it as the path argument.
+  This validates the file structure, integration schemas, and environment variable references.
+
+${c.bold('Exit Codes:')}
+  0  No errors found (warnings may be present)
+  1  One or more errors found (including configuration errors)
+  2  Invalid usage (bad arguments, file not found)
+
+${c.bold('Examples:')}
+  ${c.dim('# Lint a .deepnote file')}
+  $ deepnote lint my-project.deepnote
+
+  ${c.dim('# Lint an integrations yaml file directly')}
+  $ deepnote lint ${DEFAULT_INTEGRATIONS_FILE}
+
+  ${c.dim('# Output as JSON for CI/CD')}
+  $ deepnote lint my-project.deepnote -o json
+
+  ${c.dim('# Lint only a specific notebook')}
+  $ deepnote lint my-project.deepnote --notebook "Analysis"
+
+  ${c.dim('# Use a custom integrations file')}
+  $ deepnote lint my-project.deepnote --integrations-file prod-integrations.yaml
+
+  ${c.dim('# Use in CI pipeline')}
+  $ deepnote lint my-project.deepnote || exit 1
+`
+    })
+    .action(createLintAction(program))
+
+  // Install-skills command - install agent skill files
+  program
+    .command('install-skills')
+    .description('Install or update Deepnote agent skills for AI coding assistants')
+    .option('-g, --global', 'Install to user home directory instead of project')
+    .option('-a, --agent <agent>', 'Target a specific agent')
+    .option('--dry-run', 'Show what would be written without making changes')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Description:')}
+  Copies the Deepnote skill (SKILL.md + references) into agent skill directories
+  so AI coding assistants can understand .deepnote files.
+
+${c.bold('Supported Agents:')}
+  Claude Code      .claude/skills/
+  Cursor           .cursor/skills/
+  Windsurf         .windsurf/skills/
+  Cline            .cline/skills/
+  Roo Code         .roo/skills/
+  Augment          .augment/skills/
+  Continue         .continue/skills/
+  Antigravity      .agent/skills/
+  Trae             .trae/skills/
+  Goose            .goose/skills/
+  Junie            .junie/skills/
+  Kilo Code        .kilocode/skills/
+  Kiro             .kiro/skills/
+  GitHub Copilot   .agents/skills/
+  Codex            .agents/skills/
+  Gemini CLI       .agents/skills/
+  Amp              .agents/skills/
+  Kimi Code CLI    .agents/skills/
+  OpenCode         .agents/skills/
+
+${c.bold('Detection:')}
+  By default, installs for agents whose config directory exists (e.g. .claude/).
+  If none are detected, defaults to Claude Code.
+  Use --agent to target a specific agent regardless of detection.
+
+${c.bold('Examples:')}
+  ${c.dim('# Install for all detected agents in current project')}
+  $ deepnote install-skills
+
+  ${c.dim('# Install globally (user home directory)')}
+  $ deepnote install-skills --global
+
+  ${c.dim('# Install for a specific agent')}
+  $ deepnote install-skills --agent cursor
+
+  ${c.dim('# Preview without writing')}
+  $ deepnote install-skills --dry-run
+`
+    })
+    .action(createInstallSkillsAction(program))
+
+  // Completion command - generate shell completions
+  program
+    .command('completion')
+    .description('Generate shell completion scripts')
+    .argument('<shell>', 'Shell type: bash, zsh, or fish')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Supported Shells:')}
+  bash    Bourne Again Shell
+  zsh     Z Shell
+  fish    Friendly Interactive Shell
+
+${c.bold('Installation:')}
+  ${c.dim('# Bash (add to ~/.bashrc or ~/.bash_profile)')}
+  $ deepnote completion bash >> ~/.bashrc
+  $ source ~/.bashrc
+
+  ${c.dim('# Zsh (add to ~/.zshrc)')}
+  $ deepnote completion zsh >> ~/.zshrc
+  $ source ~/.zshrc
+
+  ${c.dim('# Fish (save to completions directory)')}
+  $ deepnote completion fish > ~/.config/fish/completions/deepnote.fish
+
+${c.bold('Examples:')}
+  ${c.dim('# Preview bash completions without installing')}
+  $ deepnote completion bash
+
+  ${c.dim('# Install zsh completions')}
+  $ deepnote completion zsh >> ~/.zshrc && source ~/.zshrc
+`
+    })
+    .action((shell: string) => {
+      const completionScript = generateCompletionScript(shell, program)
+      if (completionScript) {
+        output(completionScript)
+      } else {
+        program.error(`Unsupported shell: ${shell}. Supported shells: bash, zsh, fish`, {
+          exitCode: ExitCode.InvalidUsage,
+        })
+      }
+    })
+
+  // Integrations command - manage database integrations
+  const integrationsCmd = program
+    .command('integrations')
+    .description('Manage database integrations')
+    .addHelpText('after', () => {
+      const c = getChalk()
+      return `
+${c.bold('Subcommands:')}
+  pull        Pull integrations from Deepnote API and merge with local file
+  add         Add a new database integration interactively
+  edit        Edit an existing database integration interactively
+
+${c.bold('Examples:')}
+  ${c.dim('# Pull integrations from Deepnote API')}
+  $ deepnote integrations pull
+
+  ${c.dim('# Pull with a specific token')}
+  $ deepnote integrations pull --token <token>
+
+  ${c.dim('# Pull to a custom file path')}
+  $ deepnote integrations pull --file my-integrations.yaml
+
+  ${c.dim('# Add a new integration interactively')}
+  $ deepnote integrations add
+
+  ${c.dim('# Edit an existing integration (interactive picker)')}
+  $ deepnote integrations edit
+
+  ${c.dim('# Edit a specific integration by ID')}
+  $ deepnote integrations edit <integration-id>
+`
+    })
+
+  integrationsCmd
+    .command('pull')
+    .description('Pull integrations from Deepnote API and merge with local file')
+    .option('--url <url>', 'API base URL', DEFAULT_API_URL)
+    .option('--token <token>', `Bearer token for authentication (or use ${DEEPNOTE_TOKEN_ENV} env var)`)
+    .option('--file <path>', 'Path to integrations file', DEFAULT_INTEGRATIONS_FILE)
+    .option('--env-file <path>', 'Path to .env file for storing secrets', DEFAULT_ENV_FILE)
+    .action(createIntegrationsPullAction(program))
+
+  integrationsCmd
+    .command('add')
+    .description('Add a new database integration interactively')
+    .option('--file <path>', 'Path to integrations file', DEFAULT_INTEGRATIONS_FILE)
+    .option('--env-file <path>', 'Path to .env file for storing secrets', DEFAULT_ENV_FILE)
+    .action(createIntegrationsAddAction(program))
+
+  integrationsCmd
+    .command('edit')
+    .argument('[id]', 'Integration ID to edit (skips interactive selection)')
+    .description('Edit an existing database integration interactively')
+    .option('--file <path>', 'Path to integrations file', DEFAULT_INTEGRATIONS_FILE)
+    .option('--env-file <path>', 'Path to .env file for storing secrets', DEFAULT_ENV_FILE)
+    .action(createIntegrationsEditAction(program))
+}
+
+/**
+ * Returns shared help text for Smart File Discovery.
+ */
+function getSmartFileDiscoveryHelp(c: ReturnType<typeof getChalk>): string {
+  return `${c.bold('Smart File Discovery:')}
+  If no path is provided, finds the first .deepnote file in the current directory.
+  If a directory is provided, finds the first .deepnote file in that directory.
+  If multiple .deepnote files are found, the CLI picks the first file in alphabetical order (by filename) to ensure deterministic behavior.`
+}
+
+/**
+ * Returns the welcome text displayed in help output.
+ */
+function getWelcomeText(): string {
+  return `${chalk.bold.cyan('Deepnote CLI')} - Run Deepnote projects from the command line
+
+${chalk.dim('Run .deepnote files locally or on Deepnote Cloud for data science workflows,')}
+${chalk.dim('automation, CI/CD pipelines, and interactive development.')}
+
+${chalk.dim('Documentation:')} ${chalk.underline('https://deepnote.com/docs/getting-started')}
+${chalk.dim('Repository:')}    ${chalk.underline('https://github.com/deepnote/deepnote')}`
+}
+
+/**
+ * Parses command line arguments and runs the CLI.
+ * This is the main entry point for the CLI.
+ */
+export function run(argv?: string[]): void {
+  const program = createProgram()
+  program.parse(argv ?? process.argv)
+}

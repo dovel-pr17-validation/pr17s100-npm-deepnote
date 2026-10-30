@@ -1,0 +1,1218 @@
+import { dedent } from 'ts-dedent'
+import { describe, expect, it } from 'vitest'
+
+import { UnsupportedBlockTypeError } from './blocks'
+import type { ButtonExecutionContext } from './blocks/button-blocks'
+import { isExecutableBlockType } from './blocks/executable-blocks'
+import type {
+  AgentBlock,
+  BigNumberBlock,
+  ButtonBlock,
+  CodeBlock,
+  DeepnoteBlock,
+  InputCheckboxBlock,
+  InputDateBlock,
+  InputDateRangeBlock,
+  InputFileBlock,
+  InputSelectBlock,
+  InputSliderBlock,
+  InputTextareaBlock,
+  InputTextBlock,
+  PivotTableBlock,
+  SqlBlock,
+  VisualizationBlock,
+} from './deepnote-file/deepnote-file-schema'
+import { deepnoteBlockSchema } from './deepnote-file/deepnote-file-schema'
+import { createPythonCode } from './python-code'
+
+describe('createPythonCode', () => {
+  describe('Agent blocks', () => {
+    it('creates Python comment for agent block with prompt', () => {
+      const block: AgentBlock = {
+        id: '123',
+        type: 'agent',
+        content: 'Analyze the dataset and create a summary',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: { deepnote_agent_model: 'auto' },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('# [agent block] System prompt:\n# Analyze the dataset and create a summary')
+    })
+
+    it('creates Python comment for agent block with multiline prompt', () => {
+      const block: AgentBlock = {
+        id: '123',
+        type: 'agent',
+        content: 'First line\nSecond line\nThird line',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: { deepnote_agent_model: 'auto' },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('# [agent block] System prompt:\n# First line\n# Second line\n# Third line')
+    })
+
+    it('creates empty prompt comment for agent block with no content', () => {
+      const block: AgentBlock = {
+        id: '123',
+        type: 'agent',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: { deepnote_agent_model: 'auto' },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('# [agent block] (empty system prompt)')
+    })
+
+    it('creates empty prompt comment for agent block with whitespace-only content', () => {
+      const block: AgentBlock = {
+        id: '123',
+        type: 'agent',
+        content: '   \n  \n  ',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: { deepnote_agent_model: 'auto' },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('# [agent block] (empty system prompt)')
+    })
+
+    it('creates empty prompt comment for agent block with undefined content', () => {
+      const block: AgentBlock = {
+        id: '123',
+        type: 'agent',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: { deepnote_agent_model: 'auto' },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('# [agent block] (empty system prompt)')
+    })
+  })
+
+  describe('Button blocks', () => {
+    it('creates Python code for button block with variable', () => {
+      const block: ButtonBlock = {
+        id: '123',
+        type: 'button',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_button_behavior: 'set_variable',
+          deepnote_variable_name: 'my_button',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('my_button = False')
+    })
+
+    it('creates Python code for button block with variable context', () => {
+      const block: ButtonBlock = {
+        id: '123',
+        type: 'button',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_button_behavior: 'set_variable',
+          deepnote_variable_name: 'my_button',
+        },
+      }
+
+      const context: ButtonExecutionContext = {
+        variableContext: ['my_button'],
+      }
+
+      const result = createPythonCode(block, context)
+
+      expect(result).toEqual('my_button = True')
+    })
+
+    it('creates empty Python code for button block with run behavior', () => {
+      const block: ButtonBlock = {
+        id: '123',
+        type: 'button',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_button_behavior: 'run',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('')
+    })
+  })
+
+  describe('Big number blocks', () => {
+    it('creates Python code for big number block', () => {
+      const block: BigNumberBlock = {
+        id: '123',
+        type: 'big-number',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_big_number_title: 'Total Sales',
+          deepnote_big_number_value: 'sales',
+          deepnote_big_number_format: '',
+          deepnote_big_number_comparison_title: 'vs Last Month',
+          deepnote_big_number_comparison_value: 'last_month_sales',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+
+        def __deepnote_big_number__():
+            import json
+            import jinja2
+            from jinja2 import meta
+
+            def render_template(template):
+                parsed_content = jinja2.Environment().parse(template)
+
+                required_variables = meta.find_undeclared_variables(parsed_content)
+
+                context = {
+                    variable_name: globals().get(variable_name)
+                    for variable_name in required_variables
+                }
+
+                result = jinja2.Environment().from_string(template).render(context)
+
+                return result
+
+            rendered_title = render_template('Total Sales')
+            rendered_comparison_title = render_template('vs Last Month')
+
+            return json.dumps({
+                "comparisonTitle": rendered_comparison_title,
+                "comparisonValue": f"{last_month_sales}",
+                "title": rendered_title,
+                "value": f"{sales}"
+            })
+
+        __deepnote_big_number__()
+
+      `)
+    })
+
+    it('creates Python code for big number block without comparison fields', () => {
+      const block: BigNumberBlock = {
+        id: '123',
+        type: 'big-number',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_big_number_title: 'Revenue',
+          deepnote_big_number_value: 'total_revenue',
+          deepnote_big_number_format: '',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).not.toContain('comparisonTitle')
+      expect(result).not.toContain('comparisonValue')
+    })
+  })
+
+  describe('Code blocks', () => {
+    it('creates Python code for code block', () => {
+      const block: CodeBlock = {
+        blockGroup: 'a2498ec9b1874cca8ae88378ec166b46',
+        content: "print('Hello, world!')",
+        executionCount: 1,
+        id: '3743ceea7a9b402992a22833ac7c5a63',
+        type: 'code',
+        metadata: {},
+        sortingKey: 'a0',
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        print('Hello, world!')
+      `)
+    })
+
+    it('creates Python code for code block with table state', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: 'df',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_table_state: {
+            sortBy: [],
+            filters: [],
+            pageSize: 25,
+            pageIndex: 0,
+            columnOrder: ['date', 'value', 'category'],
+            hiddenColumnIds: [],
+            columnDisplayNames: [],
+            conditionalFilters: [],
+            cellFormattingRules: [],
+            wrappedTextColumnIds: [],
+          },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      const expectedJson = JSON.stringify({
+        sortBy: [],
+        filters: [],
+        pageSize: 25,
+        pageIndex: 0,
+        columnOrder: ['date', 'value', 'category'],
+        hiddenColumnIds: [],
+        columnDisplayNames: [],
+        conditionalFilters: [],
+        cellFormattingRules: [],
+        wrappedTextColumnIds: [],
+      })
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('${expectedJson}')
+        else:
+          _deepnote_current_table_attrs = '${expectedJson}'
+
+        df
+      `)
+    })
+
+    it('creates Python code for code block with custom page size', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: 'result',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_table_state: {
+            sortBy: [],
+            filters: [],
+            pageSize: 50,
+            pageIndex: 2,
+            columnOrder: [],
+            hiddenColumnIds: [],
+            columnDisplayNames: [],
+            conditionalFilters: [],
+            cellFormattingRules: [],
+            wrappedTextColumnIds: [],
+          },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toContain('"pageSize":50')
+      expect(result).toContain('"pageIndex":2')
+    })
+
+    it('creates Python code for code block with hidden columns', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: 'df',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_table_state: {
+            sortBy: [],
+            filters: [],
+            pageSize: 25,
+            pageIndex: 0,
+            columnOrder: ['id', 'name', 'secret'],
+            hiddenColumnIds: ['secret'],
+            columnDisplayNames: [],
+            conditionalFilters: [],
+            cellFormattingRules: [],
+            wrappedTextColumnIds: [],
+          },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toContain('"hiddenColumnIds":["secret"]')
+    })
+
+    it('escapes special characters in table state JSON string', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: 'df',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_table_state: {
+            columnDisplayNames: [{ columnName: 'value', displayName: 'It\'s a "test' }],
+          },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      // The escapePythonString function escapes backslashes and single quotes
+      // JSON.stringify already escapes double quotes to \" and escapePythonString then escapes the \ to \\
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{"columnDisplayNames":[{"columnName":"value","displayName":"It\\'s a \\\\"test"}]}')
+        else:
+          _deepnote_current_table_attrs = '{"columnDisplayNames":[{"columnName":"value","displayName":"It\\'s a \\\\"test"}]}'
+
+        df
+      `)
+    })
+
+    it('keeps a cell magic on the first line without the DataFrame config', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: '%%bash\necho 123',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {},
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('%%bash\necho 123')
+    })
+
+    it('detects a cell magic preceded by blank lines', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: '\n  \n%%bash\necho 123',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_table_state: { pageSize: 25 },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('\n  \n%%bash\necho 123')
+      expect(result).not.toContain('_dntk')
+    })
+
+    it('still prepends the DataFrame config for an indented cell magic', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: '  %%bash\necho 123',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {},
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+          %%bash
+        echo 123
+      `)
+    })
+
+    it('still prepends the DataFrame config for a line magic', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: '%time df.head()',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {},
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        %time df.head()
+      `)
+    })
+
+    it('still prepends the DataFrame config when a cell magic is not on the first line', () => {
+      const block: CodeBlock = {
+        id: '123',
+        type: 'code',
+        content: '%matplotlib inline\n%%bash\necho 123',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {},
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        %matplotlib inline
+        %%bash
+        echo 123
+      `)
+    })
+  })
+
+  describe('Input blocks', () => {
+    it('creates Python code for text input block', () => {
+      const block: InputTextBlock = {
+        id: '123',
+        type: 'input-text',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'text_input',
+          deepnote_variable_value: 'Hello World',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual("text_input = 'Hello World'")
+    })
+
+    it('creates Python code for textarea input block', () => {
+      const block: InputTextareaBlock = {
+        id: '123',
+        type: 'input-textarea',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'text_area_input',
+          deepnote_variable_value: 'Multi\nline\ntext',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual("text_area_input = 'Multi\\nline\\ntext'")
+    })
+
+    it('creates Python code for checkbox input block', () => {
+      const block: InputCheckboxBlock = {
+        id: '123',
+        type: 'input-checkbox',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'checkbox_input',
+          deepnote_variable_value: false,
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('checkbox_input = False')
+    })
+
+    it('creates Python code for select input block', () => {
+      const block: InputSelectBlock = {
+        id: '123',
+        type: 'input-select',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'select_input',
+          deepnote_variable_value: 'Option 1',
+          deepnote_variable_options: ['Option 1', 'Option 2'],
+          deepnote_variable_custom_options: [],
+          deepnote_variable_selected_variable: '',
+          deepnote_variable_select_type: 'from-options',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual("select_input = 'Option 1'")
+    })
+
+    it('creates Python code for slider input block', () => {
+      const block: InputSliderBlock = {
+        id: '123',
+        type: 'input-slider',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'slider_input',
+          deepnote_variable_value: '5',
+          deepnote_slider_min_value: 0,
+          deepnote_slider_max_value: 10,
+          deepnote_slider_step: 1,
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('slider_input = 5')
+    })
+
+    it('creates Python code for file input block', () => {
+      const block: InputFileBlock = {
+        id: '123',
+        type: 'input-file',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'file_input',
+          deepnote_variable_value: 'file_input_uploads/user_events_mini.csv',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual("file_input = 'file_input_uploads/user_events_mini.csv'")
+    })
+
+    it('creates Python code for date input block', () => {
+      const block: InputDateBlock = {
+        id: '123',
+        type: 'input-date',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_input',
+          deepnote_variable_value: '2025-09-16',
+          deepnote_input_date_version: 2,
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+
+        from dateutil.parser import parse as _deepnote_parse
+        date_input = _deepnote_parse('2025-09-16').date()
+
+      `)
+    })
+
+    it('creates Python code for date range input block with empty values', () => {
+      const block: InputDateRangeBlock = {
+        id: '123',
+        type: 'input-date-range',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_range_input',
+          deepnote_variable_value: ['', ''],
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        from dateutil.parser import parse as _deepnote_parse
+        date_range_input = [None, None]
+      `)
+    })
+
+    it('creates Python code for date range input block with past7days', () => {
+      const block: InputDateRangeBlock = {
+        id: '123',
+        type: 'input-date-range',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_range_input',
+          deepnote_variable_value: 'past7days',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        from datetime import datetime as _deepnote_datetime, timedelta as _deepnote_timedelta
+        date_range_input = [_deepnote_datetime.now().date() - _deepnote_timedelta(days=7), _deepnote_datetime.now().date()]
+      `)
+    })
+
+    it('creates Python code for date range input block with past14days', () => {
+      const block: InputDateRangeBlock = {
+        id: '123',
+        type: 'input-date-range',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_range_input',
+          deepnote_variable_value: 'past14days',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        from datetime import datetime as _deepnote_datetime, timedelta as _deepnote_timedelta
+        date_range_input = [_deepnote_datetime.now().date() - _deepnote_timedelta(days=14), _deepnote_datetime.now().date()]
+      `)
+    })
+
+    it('creates Python code for date range input block with pastMonth', () => {
+      const block: InputDateRangeBlock = {
+        id: '123',
+        type: 'input-date-range',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_range_input',
+          deepnote_variable_value: 'pastMonth',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        from datetime import datetime as _deepnote_datetime
+        from dateutil.relativedelta import relativedelta
+        date_range_input = [_deepnote_datetime.now().date() - relativedelta(months=1), _deepnote_datetime.now().date()]
+      `)
+    })
+
+    it('creates Python code for date range input block with past3months', () => {
+      const block: InputDateRangeBlock = {
+        id: '123',
+        type: 'input-date-range',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_range_input',
+          deepnote_variable_value: 'past3months',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        from datetime import datetime as _deepnote_datetime
+        from dateutil.relativedelta import relativedelta
+        date_range_input = [_deepnote_datetime.now().date() - relativedelta(months=3), _deepnote_datetime.now().date()]
+      `)
+    })
+
+    it('creates Python code for date range input block with past6months', () => {
+      const block: InputDateRangeBlock = {
+        id: '123',
+        type: 'input-date-range',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_range_input',
+          deepnote_variable_value: 'past6months',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        from datetime import datetime as _deepnote_datetime
+        from dateutil.relativedelta import relativedelta
+        date_range_input = [_deepnote_datetime.now().date() - relativedelta(months=6), _deepnote_datetime.now().date()]
+      `)
+    })
+
+    it('creates Python code for date range input block with pastYear', () => {
+      const block: InputDateRangeBlock = {
+        id: '123',
+        type: 'input-date-range',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'date_range_input',
+          deepnote_variable_value: 'pastYear',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        from datetime import datetime as _deepnote_datetime
+        from dateutil.relativedelta import relativedelta
+        date_range_input = [_deepnote_datetime.now().date() - relativedelta(years=1), _deepnote_datetime.now().date()]
+      `)
+    })
+  })
+
+  describe('SQL blocks', () => {
+    it('creates Python code for SQL block with dataframe output', () => {
+      const block: SqlBlock = {
+        blockGroup: 'a2498ec9b1874cca8ae88378ec166b46',
+        content: 'SELECT * FROM teams LIMIT 10',
+        executionCount: 1,
+        id: '3743ceea7a9b402992a22833ac7c5a63',
+        type: 'sql',
+        metadata: {
+          execution_start: 1759484006905,
+          execution_millis: 747,
+          sql_integration_id: '3e2bed0f-ebc3-40fb-bb45-205b7d45b3ec',
+          execution_context_id: 'bb6a0c9a-38c0-4645-b50f-388302c0a057',
+          deepnote_variable_name: 'df_1',
+        },
+        sortingKey: 'a0',
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        df_1 = _dntk.execute_sql(
+          'SELECT * FROM teams LIMIT 10',
+          'SQL_3E2BED0F_EBC3_40FB_BB45_205B7D45B3EC',
+          audit_sql_comment='',
+          sql_cache_mode='cache_disabled',
+          return_variable_type='dataframe'
+        )
+        df_1
+      `)
+    })
+
+    it('creates Python code for SQL block without variable name', () => {
+      const block: SqlBlock = {
+        blockGroup: 'abc',
+        content: 'SELECT COUNT(*) FROM users',
+        executionCount: 1,
+        id: '123',
+        type: 'sql',
+        metadata: {
+          sql_integration_id: '3e2bed0f-ebc3-40fb-bb45-205b7d45b3ec',
+        },
+        sortingKey: 'a0',
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        _dntk.execute_sql(
+          'SELECT COUNT(*) FROM users',
+          'SQL_3E2BED0F_EBC3_40FB_BB45_205B7D45B3EC',
+          audit_sql_comment='',
+          sql_cache_mode='cache_disabled',
+          return_variable_type='dataframe'
+        )
+      `)
+    })
+
+    it('creates Python code for SQL block with query_preview return type', () => {
+      const block: SqlBlock = {
+        blockGroup: 'abc',
+        content: 'SELECT * FROM orders',
+        executionCount: 1,
+        id: '123',
+        type: 'sql',
+        metadata: {
+          sql_integration_id: '3e2bed0f-ebc3-40fb-bb45-205b7d45b3ec',
+          deepnote_variable_name: 'preview',
+          deepnote_return_variable_type: 'query_preview',
+        },
+        sortingKey: 'a0',
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        preview = _dntk.execute_sql(
+          'SELECT * FROM orders',
+          'SQL_3E2BED0F_EBC3_40FB_BB45_205B7D45B3EC',
+          audit_sql_comment='',
+          sql_cache_mode='cache_disabled',
+          return_variable_type='query_preview'
+        )
+        preview
+      `)
+    })
+
+    it('creates Python code for SQL block without sql_integration_id', () => {
+      const block: SqlBlock = {
+        blockGroup: 'abc',
+        content: 'SELECT * FROM products',
+        executionCount: 1,
+        id: '123',
+        type: 'sql',
+        metadata: {
+          deepnote_variable_name: 'products',
+        },
+        sortingKey: 'a0',
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        products = _dntk.execute_sql(
+          'SELECT * FROM products',
+          'SQL_ALCHEMY_JSON_ENV_VAR',
+          audit_sql_comment='',
+          sql_cache_mode='cache_disabled',
+          return_variable_type='dataframe'
+        )
+        products
+      `)
+    })
+
+    it('creates Python code for SQL block with special characters', () => {
+      const block: SqlBlock = {
+        blockGroup: 'abc',
+        content: "SELECT * FROM users WHERE name = 'O\\'Reilly' AND note = \"test\\nline\"",
+        executionCount: 1,
+        id: '123',
+        type: 'sql',
+        metadata: {
+          sql_integration_id: '3e2bed0f-ebc3-40fb-bb45-205b7d45b3ec',
+          deepnote_variable_name: 'result',
+        },
+        sortingKey: 'a0',
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('{}')
+        else:
+          _deepnote_current_table_attrs = '{}'
+
+        result = _dntk.execute_sql(
+          'SELECT * FROM users WHERE name = \\'O\\\\\\'Reilly\\' AND note = "test\\\\nline"',
+          'SQL_3E2BED0F_EBC3_40FB_BB45_205B7D45B3EC',
+          audit_sql_comment='',
+          sql_cache_mode='cache_disabled',
+          return_variable_type='dataframe'
+        )
+        result
+      `)
+    })
+
+    it('creates Python code for SQL block with table state', () => {
+      const block: SqlBlock = {
+        id: '456',
+        type: 'sql',
+        content: 'SELECT * FROM analytics_views.active_plans LIMIT 100',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          sql_integration_id: 'c965a743-58bd-47ad-b24f-d8327932f9ef',
+          deepnote_variable_name: 'df_2',
+          deepnote_table_state: {
+            sortBy: [],
+            filters: [],
+            pageSize: 10,
+            pageIndex: 1,
+            columnOrder: ['id', 'team_id', 'plan_name'],
+            hiddenColumnIds: [],
+            columnDisplayNames: [],
+            conditionalFilters: [],
+            cellFormattingRules: [],
+            wrappedTextColumnIds: [],
+          },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      const expectedJson = JSON.stringify({
+        sortBy: [],
+        filters: [],
+        pageSize: 10,
+        pageIndex: 1,
+        columnOrder: ['id', 'team_id', 'plan_name'],
+        hiddenColumnIds: [],
+        columnDisplayNames: [],
+        conditionalFilters: [],
+        cellFormattingRules: [],
+        wrappedTextColumnIds: [],
+      })
+
+      expect(result).toEqual(dedent`
+        if '_dntk' in globals():
+          _dntk.dataframe_utils.configure_dataframe_formatter('${expectedJson}')
+        else:
+          _deepnote_current_table_attrs = '${expectedJson}'
+
+        df_2 = _dntk.execute_sql(
+          'SELECT * FROM analytics_views.active_plans LIMIT 100',
+          'SQL_C965A743_58BD_47AD_B24F_D8327932F9EF',
+          audit_sql_comment='',
+          sql_cache_mode='cache_disabled',
+          return_variable_type='dataframe'
+        )
+        df_2
+      `)
+    })
+
+    it('creates Python code for SQL block with custom page size', () => {
+      const block: SqlBlock = {
+        id: '456',
+        type: 'sql',
+        content: 'SELECT * FROM users',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          sql_integration_id: 'integration-123',
+          deepnote_variable_name: 'users',
+          deepnote_table_state: {
+            sortBy: [],
+            filters: [],
+            pageSize: 100,
+            pageIndex: 0,
+            columnOrder: [],
+            hiddenColumnIds: [],
+            columnDisplayNames: [],
+            conditionalFilters: [],
+            cellFormattingRules: [],
+            wrappedTextColumnIds: [],
+          },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toContain('"pageSize":100')
+      expect(result).toContain('"pageIndex":0')
+    })
+  })
+
+  describe('Visualization blocks', () => {
+    it('creates Python code for visualization block', () => {
+      const block: VisualizationBlock = {
+        id: '123',
+        type: 'visualization',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'df',
+          deepnote_visualization_spec: {
+            mark: 'bar',
+            encoding: {
+              x: { field: 'a', type: 'ordinal' },
+              y: { field: 'b', type: 'quantitative' },
+            },
+          },
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        _dntk.DeepnoteChart(df, '{"mark":"bar","encoding":{"x":{"field":"a","type":"ordinal"},"y":{"field":"b","type":"quantitative"}}}', filters='[]')
+      `)
+    })
+
+    it('returns empty string for visualization block without variable name', () => {
+      const block: VisualizationBlock = {
+        id: '123',
+        type: 'visualization',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {},
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('')
+    })
+  })
+
+  describe('Pivot table blocks', () => {
+    it('creates Python code for pivot table block', () => {
+      const block: PivotTableBlock = {
+        id: '123',
+        type: 'pivot-table',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'df',
+          deepnote_pivot_rows: ['category'],
+          deepnote_pivot_cols: ['region'],
+          deepnote_pivot_aggregator: 'sum',
+          deepnote_pivot_value_field: 'value',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual(dedent`
+        import json as _deepnote_json
+        from IPython.display import display as _deepnote_display
+
+        _deepnote_display(
+          {
+            'application/vnd.deepnote.pivot-table.v1+json': _deepnote_json.loads(_dntk.deepnote_get_data_preview_json(df, '[]', [], 10000, "sampled"))
+          },
+          raw=True
+        )
+      `)
+    })
+
+    it.each([
+      ['without variable name', {}],
+      ['whose variable name sanitizes to nothing', { deepnote_variable_name: '123' }],
+    ])('returns empty string for pivot table block %s', (_case, metadata) => {
+      const block: PivotTableBlock = {
+        id: '123',
+        type: 'pivot-table',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata,
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('')
+    })
+
+    it('sanitizes the variable name of a pivot table block', () => {
+      const block: PivotTableBlock = {
+        id: '123',
+        type: 'pivot-table',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_variable_name: 'my df',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toContain('deepnote_get_data_preview_json(my_df, ')
+    })
+  })
+
+  describe('Agent blocks', () => {
+    it('returns comment-based code for agent block', () => {
+      const block: AgentBlock = {
+        id: '123',
+        type: 'agent',
+        content: 'Analyze the data',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {
+          deepnote_agent_model: 'gpt-5',
+        },
+      }
+
+      const result = createPythonCode(block)
+
+      expect(result).toEqual('# [agent block] System prompt:\n# Analyze the data')
+    })
+  })
+
+  describe('Non-executable blocks', () => {
+    // Derived from the schema rather than from createPythonCode, so a new block type that nobody
+    // taught createPythonCode about shows up here as a failure.
+    const nonExecutableBlockTypes = deepnoteBlockSchema.options
+      .map(blockSchema => blockSchema.shape.type.value)
+      .filter(type => !isExecutableBlockType(type))
+
+    it('finds the non-executable block types in the schema', () => {
+      expect(nonExecutableBlockTypes.length).toBeGreaterThan(0)
+    })
+
+    it.each(nonExecutableBlockTypes)('throws UnsupportedBlockTypeError for a %s block', type => {
+      const block = deepnoteBlockSchema.parse({
+        id: '123',
+        type,
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+      })
+
+      expect(() => createPythonCode(block)).toThrow(UnsupportedBlockTypeError)
+      expect(() => createPythonCode(block)).toThrow(
+        `Creating python code from block type ${type} is not supported yet.`
+      )
+    })
+
+    it('throws UnsupportedBlockTypeError for a block type the schema does not know', () => {
+      const block = {
+        id: '123',
+        type: 'crystal-ball',
+        content: '',
+        blockGroup: 'abc',
+        sortingKey: 'a0',
+        metadata: {},
+      } as unknown as DeepnoteBlock
+
+      expect(() => createPythonCode(block)).toThrow(UnsupportedBlockTypeError)
+      expect(() => createPythonCode(block)).toThrow('Unexpected block type encountered')
+    })
+  })
+})

@@ -1,0 +1,88 @@
+name: CD
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+    # Only run if the release tag follows the package-scoped pattern: @deepnote/package-name@version
+    if: startsWith(github.event.release.tag_name, '@deepnote/')
+    env:
+      # actions/setup-node automatically creates .npmrc with //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Extract package info from tag
+        id: package_info
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+
+          # Extract package name and version from tag (format: @deepnote/package-name@version)
+          if [[ ! "$TAG" =~ ^(@deepnote/[^@]+)@(.+)$ ]]; then
+            echo "Error: Tag must follow format @deepnote/package-name@version"
+            exit 1
+          fi
+
+          PACKAGE_NAME="${BASH_REMATCH[1]}"
+          TAG_VERSION="${BASH_REMATCH[2]}"
+
+          echo "package_name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "tag_version=$TAG_VERSION" >> $GITHUB_OUTPUT
+
+          echo "Detected package: $PACKAGE_NAME"
+          echo "Detected version: $TAG_VERSION"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate package version
+        run: |
+          PACKAGE_NAME="${{ steps.package_info.outputs.package_name }}"
+          TAG_VERSION="${{ steps.package_info.outputs.tag_version }}"
+
+          # Find the package.json path based on package name
+          PACKAGE_PATH="packages/${PACKAGE_NAME#@deepnote/}"
+
+          if [[ ! -f "$PACKAGE_PATH/package.json" ]]; then
+            echo "Error: Package not found at $PACKAGE_PATH"
+            exit 1
+          fi
+
+          # Extract version from package.json
+          PACKAGE_VERSION=$(node -p "require('./$PACKAGE_PATH/package.json').version")
+
+          if [[ "$PACKAGE_VERSION" != "$TAG_VERSION" ]]; then
+            echo "Error: Version mismatch!"
+            echo "  Tag version: $TAG_VERSION"
+            echo "  Package version: $PACKAGE_VERSION"
+            exit 1
+          fi
+
+          echo "Version validation passed: $TAG_VERSION"
+
+      - name: Build package
+        run: pnpm --filter "${{ steps.package_info.outputs.package_name }}..." run build
+
+      - name: Publish to npm
+        run: pnpm publish --filter "${{ steps.package_info.outputs.package_name }}" --no-git-checks

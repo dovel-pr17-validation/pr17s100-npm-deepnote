@@ -1,0 +1,279 @@
+import { createMCPClient, type MCPClient } from '@ai-sdk/mcp'
+import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio'
+import type { AgentBlock, DeepnoteBlock, DeepnoteFile, McpServerConfig } from '@deepnote/blocks'
+import { extractOutputsText } from '@deepnote/blocks'
+import { isStepCount, ToolLoopAgent, tool } from 'ai'
+import { z } from 'zod'
+import { parseAgentModel, resolveAgentModel } from './agent-provider'
+
+export type AgentStreamEvent =
+  | { type: 'tool_called'; toolName: string }
+  | { type: 'tool_output'; toolName: string; output: string }
+  | { type: 'text_delta'; text: string }
+  | { type: 'reasoning_delta'; text: string }
+
+export interface AgentBlockContext {
+  /** API key for the provider named by the block's `deepnote_agent_model`. Read from env when omitted. */
+  apiKey?: string
+  /** @deprecated Use {@link AgentBlockContext.apiKey}. Only used for OpenAI models. */
+  openAiToken?: string
+  mcpServers: McpServerConfig[]
+  notebookContext: string
+  addAndExecuteCodeBlock: (args: { code: string }) => Promise<string>
+  addMarkdownBlock: (args: { content: string }) => Promise<string>
+  onAgentEvent?: (event: AgentStreamEvent) => void | Promise<void>
+  /** Optional sink for non-fatal warnings (e.g. MCP client cleanup failures). The host decides how to surface them. */
+  onWarning?: (message: string) => void
+  integrations?: Array<{ id: string; name: string; type: string }>
+  signal?: AbortSignal
+}
+
+export interface AgentBlockResult {
+  finalOutput: string
+}
+
+export function resolveEnvVars(env: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!env) return undefined
+  const resolved: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    resolved[key] = value.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] ?? '')
+  }
+  return resolved
+}
+
+export function serializeNotebookContext(
+  file: DeepnoteFile,
+  notebookIndex: number,
+  collectedOutputs: Map<string, { outputs: unknown[]; executionCount: number | null }>
+): string {
+  const notebook = file.project.notebooks[notebookIndex]
+  if (notebook == null) {
+    return 'Empty notebook.'
+  }
+
+  const blocksWithAttachedOutputs = createBlocksWithAttachedOutputsFromCollectedOutputs({
+    blocks: notebook.blocks,
+    collectedOutputs,
+  })
+  return serializeNotebookContextFromBlocks({
+    blocks: blocksWithAttachedOutputs,
+    notebookName: notebook.name,
+  })
+}
+
+export function createBlocksWithAttachedOutputsFromCollectedOutputs({
+  blocks,
+  collectedOutputs,
+}: {
+  blocks: DeepnoteBlock[]
+  collectedOutputs: Map<string, { outputs: unknown[]; executionCount: number | null }>
+}): DeepnoteBlock[] {
+  return blocks.map(block => {
+    const collected = collectedOutputs.get(block.id)
+    if (collected != null) {
+      return { ...block, outputs: collected.outputs }
+    }
+    if ('outputs' in block) {
+      return { ...block, outputs: [] }
+    }
+    return block
+  })
+}
+
+export function serializeNotebookContextFromBlocks({
+  blocks,
+  notebookName,
+}: {
+  blocks: DeepnoteBlock[]
+  notebookName: string
+}): string {
+  const lines: string[] = [`# Notebook: ${notebookName}`, '']
+
+  for (const block of blocks) {
+    lines.push(`## Block [${block.type}] (id: ${block.id.slice(0, 8)})`)
+
+    if (block.content) {
+      lines.push('```')
+      lines.push(block.content)
+      lines.push('```')
+    }
+
+    if ('outputs' in block && block.outputs && block.outputs.length > 0) {
+      lines.push('### Output:')
+      const text = extractOutputsText(block.outputs)
+      if (text) lines.push(text)
+    }
+
+    lines.push('')
+  }
+
+  return lines.join('\n')
+}
+
+export function buildSystemPrompt(
+  notebookContext: string,
+  integrations?: Array<{ id: string; name: string; type: string }>
+): string {
+  let prompt = `You are a data science assistant working inside a Deepnote notebook. You can add code blocks and markdown blocks to the notebook.
+
+## Current notebook state
+
+${notebookContext}
+
+## Instructions
+
+- Use add_code_block to write and execute Python code. You will see the output.
+- Use add_markdown_block to add explanations, section headers, or documentation.
+- Analyze data step by step: load, explore, transform, visualize, summarize.
+- If a code block errors, read the error and try a different approach.
+- When you are done, provide a brief summary of what you did and found.
+- Be concise in markdown blocks. Prefer code that shows results over long explanations.`
+
+  if (integrations && integrations.length > 0) {
+    prompt += `
+
+## Available database integrations
+
+The following database integrations are configured and available. To query them,
+use add_code_block with the deepnote-toolkit SQL helper:
+
+\`\`\`python
+import deepnote_toolkit as dntk
+df = dntk.execute_sql("SELECT * FROM users LIMIT 10", "SQL_<INTEGRATION_ID>")
+\`\`\`
+
+Available integrations:
+${integrations.map(i => `- "${i.name}" (${i.type}, id: ${i.id})`).join('\n')}`
+  }
+
+  return prompt
+}
+
+export async function executeAgentBlock(block: AgentBlock, context: AgentBlockContext): Promise<AgentBlockResult> {
+  // Before any resource acquisition — a pre-aborted call must not spawn MCP subprocesses
+  context.signal?.throwIfAborted()
+
+  const spec = block.metadata.deepnote_agent_model
+  // The deprecated alias only ever held an OpenAI key; never send it to another provider.
+  const legacyKey = parseAgentModel(spec).providerId === 'openai' ? context.openAiToken : undefined
+  const { model, providerOptions } = resolveAgentModel({ spec, apiKey: context.apiKey ?? legacyKey })
+  const maxTurns = 10
+
+  const blockMcpServers = block.metadata.deepnote_mcp_servers ?? []
+  const mergedMcpConfig = mergeMcpConfigs(context.mcpServers, blockMcpServers)
+
+  let mcpClients: Array<{ client: MCPClient; name: string }> = []
+  try {
+    const clientResults = await Promise.allSettled(
+      mergedMcpConfig.map(s =>
+        createMCPClient({
+          transport: new Experimental_StdioMCPTransport({
+            command: s.command,
+            args: s.args,
+            env: resolveEnvVars(s.env),
+            stderr: 'pipe',
+          }),
+        })
+      )
+    )
+    mcpClients = clientResults.flatMap((result, index) =>
+      result.status === 'fulfilled'
+        ? [{ client: result.value, name: mergedMcpConfig[index]?.name ?? `server-${index + 1}` }]
+        : []
+    )
+    // Placed after mcpClients is populated so `finally` still closes whatever did start
+    context.signal?.throwIfAborted()
+    const failed = clientResults.find(r => r.status === 'rejected')
+    if (failed != null) {
+      throw failed.reason
+    }
+
+    const addCodeBlockTool = tool({
+      description:
+        'Add a Python code block to the notebook and execute it. Returns the combined output text or an error message.',
+      inputSchema: z.object({
+        code: z.string().describe('Python code to execute'),
+      }),
+      execute: async args => {
+        context.signal?.throwIfAborted()
+        return context.addAndExecuteCodeBlock(args)
+      },
+    })
+
+    const addMarkdownBlockTool = tool({
+      description: 'Add a markdown block to the notebook for explanations, section headers, or documentation.',
+      inputSchema: z.object({
+        content: z.string().describe('Markdown content'),
+      }),
+      execute: async args => {
+        context.signal?.throwIfAborted()
+        return context.addMarkdownBlock(args)
+      },
+    })
+
+    const mcpToolSets = await Promise.all(mcpClients.map(({ client }) => client.tools()))
+    // Without this the agent still issues one model request before the SDK honors the aborted signal
+    context.signal?.throwIfAborted()
+    const mcpTools: Record<string, unknown> = Object.assign({}, ...mcpToolSets)
+
+    const agent = new ToolLoopAgent({
+      model,
+      instructions: buildSystemPrompt(context.notebookContext, context.integrations),
+      tools: {
+        add_code_block: addCodeBlockTool,
+        add_markdown_block: addMarkdownBlockTool,
+        ...mcpTools,
+      },
+      stopWhen: isStepCount(maxTurns),
+      providerOptions,
+    })
+
+    const streamResult = await agent.stream({ prompt: block.content ?? '', abortSignal: context.signal })
+
+    for await (const part of streamResult.stream) {
+      if (part.type === 'text-delta') {
+        await context.onAgentEvent?.({ type: 'text_delta', text: part.text })
+      } else if (part.type === 'reasoning-delta') {
+        await context.onAgentEvent?.({ type: 'reasoning_delta', text: part.text })
+      } else if (part.type === 'tool-call') {
+        await context.onAgentEvent?.({ type: 'tool_called', toolName: part.toolName })
+      } else if (part.type === 'tool-result') {
+        const toolOutput = 'output' in part ? part.output : undefined
+        const outputStr = typeof toolOutput === 'string' ? toolOutput : (JSON.stringify(toolOutput) ?? '')
+        await context.onAgentEvent?.({ type: 'tool_output', toolName: part.toolName, output: outputStr })
+      } else if (part.type === 'error') {
+        // Otherwise `.text` rejects with a generic "No output generated" and the provider's message is lost.
+        throw part.error
+      }
+    }
+
+    const finalText = await streamResult.text
+
+    // A late abort leaves .text resolving with the *previous* step's text — never return that as a result
+    context.signal?.throwIfAborted()
+
+    return {
+      finalOutput: finalText ?? '',
+    }
+  } finally {
+    for (const { client, name } of mcpClients) {
+      try {
+        await client.close()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        context.onWarning?.(`[agent] Failed to close MCP client "${name}": ${message}`)
+      }
+    }
+  }
+}
+
+export function mergeMcpConfigs(projectServers: McpServerConfig[], blockServers: McpServerConfig[]): McpServerConfig[] {
+  const byName = new Map<string, McpServerConfig>()
+  for (const s of projectServers) {
+    byName.set(s.name, s)
+  }
+  for (const s of blockServers) {
+    byName.set(s.name, s)
+  }
+  return Array.from(byName.values())
+}

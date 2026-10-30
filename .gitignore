@@ -1,0 +1,23 @@
+.claude/worktrees
+.DS_Store
+.env
+.npmrc
+.pnpm-store
+.qlty/cache
+.qlty/logs
+.qlty/out
+.qlty/plugin_cachedir
+.qlty/results
+*.png
+!packages/**/*.png
+*.tsbuildinfo
+coverage
+dist
+examples/report.md
+examples/snapshots/*_T*.snapshot.deepnote
+node_modules
+
+# Copied in by the steps in README.md — build output and your own snapshot, not source.
+snapshot-reader.js
+snapshot-viewer.js
+snapshot.deepnote

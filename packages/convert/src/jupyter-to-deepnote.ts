@@ -1,0 +1,277 @@
+import { randomUUID } from 'node:crypto'
+import fs from 'node:fs/promises'
+import { basename, dirname, extname } from 'node:path'
+import type { DeepnoteBlock, DeepnoteFile, Environment, Execution } from '@deepnote/blocks'
+import {
+  deepnoteBlockSchema,
+  environmentSchema,
+  executionSchema,
+  generateSortingKey,
+  serializeDeepnoteFile,
+} from '@deepnote/blocks'
+import { FileReadError, JsonParseError } from './errors'
+import type { JupyterCell, JupyterNotebook } from './types/jupyter'
+import { sortKeysAlphabetically } from './utils'
+
+export interface ConvertIpynbFileToDeepnoteFileOptions {
+  outputPath: string
+  projectName: string
+  projectId?: string
+}
+
+export interface ReadAndConvertIpynbFileOptions {
+  projectName: string
+  projectId?: string
+}
+
+export interface ConvertJupyterNotebookOptions {
+  /** Custom ID generator function. Defaults to crypto.randomUUID(). */
+  idGenerator?: () => string
+}
+
+export interface JupyterNotebookInput {
+  filename: string
+  notebook: JupyterNotebook
+}
+
+/**
+ * Converts a single Jupyter Notebook into an array of Deepnote blocks.
+ * This is the lowest-level conversion function, suitable for use in Deepnote Cloud.
+ *
+ * @param notebook - The Jupyter notebook object to convert
+ * @param options - Optional conversion options including custom ID generator
+ * @returns Array of DeepnoteBlock objects
+ *
+ * @example
+ * ```typescript
+ * import { convertJupyterNotebookToBlocks } from '@deepnote/convert'
+ *
+ * const notebook = JSON.parse(ipynbContent)
+ * const blocks = convertJupyterNotebookToBlocks(notebook, {
+ *   idGenerator: () => myCustomIdGenerator()
+ * })
+ * ```
+ */
+export function convertJupyterNotebookToBlocks(
+  notebook: JupyterNotebook,
+  options?: ConvertJupyterNotebookOptions
+): DeepnoteBlock[] {
+  const idGenerator = options?.idGenerator ?? randomUUID
+  return notebook.cells.map((cell, index) => convertCellToBlock(cell, index, idGenerator))
+}
+
+/**
+ * Converts a single Jupyter Notebook object into a Deepnote project file.
+ * This is a pure conversion function that doesn't perform any file I/O.
+ *
+ * @param input - A Jupyter notebook with its filename
+ * @param options - Conversion options including project name and optional project id
+ * @returns A DeepnoteFile object containing exactly one notebook
+ */
+export function convertJupyterNotebookToDeepnote(
+  input: JupyterNotebookInput,
+  options: { projectName: string; projectId?: string }
+): DeepnoteFile {
+  const { filename, notebook } = input
+
+  // Extract environment and execution from the notebook metadata
+  // (these are project-level fields stored in notebook metadata during conversion)
+  let environment: Environment | undefined
+  let execution: Execution | undefined
+
+  if (notebook.metadata?.deepnote_environment) {
+    const parsed = environmentSchema.safeParse(notebook.metadata.deepnote_environment)
+    if (parsed.success) {
+      environment = parsed.data
+    }
+  }
+  if (notebook.metadata?.deepnote_execution) {
+    const parsed = executionSchema.safeParse(notebook.metadata.deepnote_execution)
+    if (parsed.success) {
+      execution = parsed.data
+    }
+  }
+
+  const extension = extname(filename)
+  const filenameWithoutExt = basename(filename, extension) || 'Untitled notebook'
+
+  const blocks = convertJupyterNotebookToBlocks(notebook)
+
+  // Check if notebook has Deepnote metadata (from a previous conversion)
+  const notebookId = notebook.metadata?.deepnote_notebook_id as string | undefined
+  const notebookName = notebook.metadata?.deepnote_notebook_name as string | undefined
+  const executionMode = notebook.metadata?.deepnote_execution_mode as 'block' | 'downstream' | undefined
+  const isModule = notebook.metadata?.deepnote_is_module as boolean | undefined
+  const workingDirectory = notebook.metadata?.deepnote_working_directory as string | undefined
+
+  // Prefer ID from metadata (for roundtrip), otherwise generate a new one
+  const resolvedNotebookId = notebookId ?? randomUUID()
+
+  const deepnoteFile: DeepnoteFile = {
+    environment,
+    execution,
+    metadata: {
+      createdAt: new Date().toISOString(),
+    },
+    project: {
+      id: options.projectId ?? randomUUID(),
+      integrations: [],
+      name: options.projectName,
+      notebooks: [
+        {
+          blocks,
+          executionMode: executionMode ?? 'block',
+          id: resolvedNotebookId,
+          isModule: isModule ?? false,
+          name: notebookName ?? filenameWithoutExt,
+          workingDirectory,
+        },
+      ],
+      settings: {},
+    },
+    version: '1.0.0',
+  }
+
+  return deepnoteFile
+}
+
+/**
+ * Reads and converts a single Jupyter Notebook (.ipynb) file into a DeepnoteFile.
+ * This function reads the file and returns the converted DeepnoteFile without writing to disk.
+ *
+ * @param inputFilePath - Path to the .ipynb file
+ * @param options - Conversion options including project name and optional project id
+ * @returns A DeepnoteFile object
+ */
+export async function readAndConvertIpynbFile(
+  inputFilePath: string,
+  options: ReadAndConvertIpynbFileOptions
+): Promise<DeepnoteFile> {
+  const notebook = await parseIpynbFile(inputFilePath)
+
+  return convertJupyterNotebookToDeepnote(
+    {
+      filename: basename(inputFilePath),
+      notebook,
+    },
+    {
+      projectId: options.projectId,
+      projectName: options.projectName,
+    }
+  )
+}
+
+/**
+ * Converts a single Jupyter Notebook (.ipynb) file into a Deepnote project file.
+ */
+export async function convertIpynbFileToDeepnoteFile(
+  inputFilePath: string,
+  options: ConvertIpynbFileToDeepnoteFileOptions
+): Promise<void> {
+  const deepnoteFile = await readAndConvertIpynbFile(inputFilePath, {
+    projectId: options.projectId,
+    projectName: options.projectName,
+  })
+
+  const yamlContent = serializeDeepnoteFile(deepnoteFile)
+
+  const parentDir = dirname(options.outputPath)
+  await fs.mkdir(parentDir, { recursive: true })
+  await fs.writeFile(options.outputPath, yamlContent, 'utf-8')
+}
+
+async function parseIpynbFile(filePath: string): Promise<JupyterNotebook> {
+  let ipynbJson: string
+
+  try {
+    ipynbJson = await fs.readFile(filePath, 'utf-8')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    throw new FileReadError(`Failed to read ${filePath}: ${message}`, { cause: error, filePath })
+  }
+
+  try {
+    return JSON.parse(ipynbJson) as JupyterNotebook
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    throw new JsonParseError(`Failed to parse ${filePath}: invalid JSON - ${message}`, { cause: error, filePath })
+  }
+}
+
+function convertCellToBlock(cell: JupyterCell, index: number, idGenerator: () => string): DeepnoteBlock {
+  let source = Array.isArray(cell.source) ? cell.source.join('') : cell.source
+
+  // Check if this cell has Deepnote metadata (from a previous conversion)
+  const cellId = cell.metadata?.cell_id as string | undefined
+  const deepnoteCellType = cell.metadata?.deepnote_cell_type as string | undefined
+  const sortingKey = cell.metadata?.deepnote_sorting_key as string | undefined
+
+  // Restore snapshot fields from metadata
+  const contentHash = cell.metadata?.deepnote_content_hash as string | undefined
+  const executionStartedAt = cell.metadata?.deepnote_execution_started_at as string | undefined
+  const executionFinishedAt = cell.metadata?.deepnote_execution_finished_at as string | undefined
+
+  // Determine blockGroup: prefer metadata, fall back to top-level field, then generate
+  // Cloud-exported notebooks may have block_group at top level
+  const blockGroup = cell.metadata?.deepnote_block_group ?? cell.block_group ?? idGenerator()
+
+  // Restore original content from metadata if available (for lossless roundtrip)
+  // For plain code blocks, only use deepnote_source if it matches the current source
+  // (this respects user edits while preserving roundtrip for unchanged content)
+  // For non-code blocks (sql, text-cell-h2, etc.), always use deepnote_source since
+  // transformations are applied during export (e.g., "Data Cleaning" → "## Data Cleaning")
+  const deepnoteSource = cell.metadata?.deepnote_source as string | undefined
+  const isPlainCodeBlock = cell.cell_type === 'code' && (!deepnoteCellType || deepnoteCellType === 'code')
+  if (deepnoteSource !== undefined) {
+    if (isPlainCodeBlock) {
+      // Plain code blocks: only use deepnote_source if content is unchanged
+      if (deepnoteSource === source) {
+        source = deepnoteSource
+      }
+      // Otherwise, user has edited - keep the actual source
+    } else {
+      // Non-code blocks: always use deepnote_source (content is transformed during export)
+      source = deepnoteSource
+    }
+  }
+
+  const blockType = (deepnoteCellType ?? (cell.cell_type === 'code' ? 'code' : 'markdown')) as DeepnoteBlock['type']
+
+  // Extract original metadata (exclude Deepnote-specific fields)
+  const originalMetadata = { ...cell.metadata }
+  delete originalMetadata.cell_id
+  delete originalMetadata.deepnote_cell_type
+  delete originalMetadata.deepnote_block_group
+  delete originalMetadata.deepnote_sorting_key
+  delete originalMetadata.deepnote_source
+  delete originalMetadata.deepnote_content_hash
+  delete originalMetadata.deepnote_execution_started_at
+  delete originalMetadata.deepnote_execution_finished_at
+  // Also remove top-level block_group from metadata to avoid duplication
+  delete (cell as { block_group?: unknown }).block_group
+
+  // Build block object - order doesn't matter here since we sort alphabetically after parsing
+  // Only include executionCount and outputs when they have values
+  const executionCount = cell.execution_count ?? undefined
+  const hasExecutionCount = executionCount !== undefined
+  const hasOutputs = cell.cell_type === 'code' && cell.outputs !== undefined
+
+  const parsed = deepnoteBlockSchema.parse({
+    blockGroup,
+    content: source,
+    ...(contentHash ? { contentHash } : {}),
+    ...(hasExecutionCount ? { executionCount } : {}),
+    ...(executionFinishedAt ? { executionFinishedAt } : {}),
+    ...(executionStartedAt ? { executionStartedAt } : {}),
+    id: cellId ?? idGenerator(),
+    metadata: originalMetadata,
+    ...(hasOutputs ? { outputs: cell.outputs } : {}),
+    sortingKey: sortingKey ?? generateSortingKey(index),
+    type: blockType,
+  })
+
+  // Sort keys alphabetically for stable YAML output
+  return sortKeysAlphabetically(parsed)
+}

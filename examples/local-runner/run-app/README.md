@@ -1,0 +1,80 @@
+# run-app
+
+A page that runs [`../../local-runner-showcase.deepnote`](../../local-runner-showcase.deepnote):
+edit the inputs, click **Run**, and real Python output — a KPI, a table, a chart, and an
+agent-written readout — comes back, powered entirely by
+[`@deepnote/local-runner`](../../../packages/local-runner)'s `serveStatic`.
+
+There is one **Run** button and one `POST /api/run` behind it. Where the run happens is a server
+setting, not a second button: `serveStatic` sends it to Deepnote Cloud unless told otherwise, so an
+app runs on Deepnote without being configured for it.
+
+It's an app shell, not a document: an inputs panel on the left, a results canvas on the right. Two
+files do the work — [`serve.mjs`](./serve.mjs) (`serveStatic({ dir, notebookPath })`) and
+[`index.html`](./index.html) (`GET /api/info` to build the controls, then the run, schedule, and
+history APIs to drive the page). No framework, no build step.
+
+## Run it
+
+```bash
+DEEPNOTE_TOKEN=... pnpm example:local-runner
+# open the printed http://127.0.0.1:<port>
+```
+
+That builds the package and starts the server. Edit the inputs and hit **Run** — the notebook runs
+in Deepnote Cloud and the dashboard updates. `serve.mjs` also reads a `.env` in the working
+directory (like `deepnote run`), so the token can live there instead; the startup banner prints
+what it found and where runs will go.
+
+`POST /api/run` reaches `runInCloud` → the shared `@deepnote/cloud` client, the same one behind
+`deepnote run --cloud`. One click is enough whether or not the notebook is in Deepnote yet. If it
+already exists there it runs and the outputs come back with a "view in Deepnote" link; if it
+doesn't, `runInCloud` creates it — project, notebook, blocks — and runs it in the same call,
+reporting `created: true`. Nothing opens a browser: a token is required either way, so there's no
+reason to hand the job to a logged-in session. Without a token the run degrades gracefully and the
+status line says what's missing.
+
+The first cloud run is the slow one — blocks are created one API request each, so a 16-block
+notebook is 16 round-trips before the run even starts. Later runs reuse the notebook and skip
+straight to it. The agent block runs on Deepnote's side, so no `OPENAI_API_KEY` is involved.
+
+## Run in a local kernel instead
+
+Same button, same endpoint — one setting changes where the work happens:
+
+```bash
+RUN_TARGET=local OPENAI_API_KEY=sk-... pnpm example:local-runner
+```
+
+Local runs need Python with `deepnote-toolkit[server]`. The agent block also needs `OPENAI_API_KEY`;
+without it, the dashboard renders but the agent block fails. The notebook uses `auto`, which selects
+`OPENAI_MODEL` (or `gpt-6.1-sol`) locally and workspace settings in Cloud.
+
+## Schedule recurring cloud runs
+
+The **Schedule** control is a thin frontend over `POST /api/schedule-cloud`. It sends a structured
+Daily, Weekly (choose weekday), or Monthly (choose calendar day) cadence plus time and timezone.
+`serveStatic` validates and converts that cadence to cron before calling `scheduleInCloud`, so custom
+frontends can reuse the scheduling behavior without implementing cron conversion. Advanced
+frontends can still send raw cron.
+
+Scheduling creates the cloud notebook if necessary but does not run it immediately. Recurring runs
+use the input values stored in Deepnote; when scheduling creates the notebook, those are the
+defaults committed in the `.deepnote` file. Each notebook has its own schedule, so saving again
+updates this notebook's schedule.
+
+The scheduler remains available while a cloud run is active. The local-runner library coordinates
+the first create-if-missing operation, so custom frontends can safely offer the same concurrency
+without implementing their own lock.
+
+## Notes
+
+- HTML outputs (the KPI cards, the table) render in a `sandbox`ed iframe with a **null origin**, so
+  output can't reach this page's DOM, storage, or cookies. It isn't sealed off entirely: `allow-scripts`
+  is on so the frame can report its height, and `postMessage` is the channel it uses — which is why the
+  listener checks both the origin and the sending frame before believing a number.
+- Input values are coerced to each block's schema shape before running, so native control values just
+  work: the range input hands over the number `7` and the `input-slider` block stores `'7'`, because a
+  slider's value is a string in the schema. That is a storage detail, not what your code sees — the
+  block's generated Python is `months = 7`, so the kernel has an `int`. A text input stores and
+  injects a string, and a checkbox a real `True`/`False`.

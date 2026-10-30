@@ -1,0 +1,46 @@
+---
+title: Scheduling
+noIndex: false
+noContent: false
+---
+
+Deepnote lets you execute your notebooks on a daily, weekly, monthly or hourly basis, or with a custom cron string. This is useful if you want to process data or update a dashboard at a regular frequency.
+
+<Callout  status="info">
+Scheduling is available on Team, Pro and Enterprise plans. Hourly and custom schedule is available on Enterprise plan only.
+</Callout>
+
+### From exploratory analysis to production pipelines
+
+Deepnote makes it easy to take your explorations to production. For example:
+
+1. Imagine you build a churn prediction model and store it in the filesystem. You can add a second notebook to your project which runs on a weekly basis, fetches the activity data of your customers from the warehouse, runs a prediction, and triggers a retention campaign.
+2. You can build a lead scoring model, and [create an app](/docs/creating-apps) which displays the most promising leads to your account executives. However, since you have so many leads and a very advanced model, the process might take a bit of time. You can schedule the notebook to run just before the sales team comes to work, so that the app contains fresh info whenever as soon as they open it.
+
+### How to schedule a notebook
+
+1. Click the calendar icon **Schedule notebook**, which is at the top of the notebook, next to the **Run** button
+2. Enable **Schedule notebook**, configure the frequency at which you want the notebook to run, and then click **Save schedule**.
+3. Additionally, you can also configure notifications for successful and failed runs, either by email or into Slack.
+
+![Scheduling notifications](../assets/docs/scheduling/scheduling-notifications.webp)
+
+Each notebook in a project can have its own schedule.
+
+### How to know if your scheduled notebook ran successfully
+
+If an exception is raised during the run, the run is considered failed; otherwise, it's successful. Please note that if an error is raised in a block, the subsequent blocks are not executed. Every run automatically creates a [run snapshot](/docs/run-snapshots), an immutable record of the notebook's state after execution. You can review snapshots of successful and failed runs from the Runs sidebar or the project logs.
+
+![Scheduling versions](../assets/docs/scheduling/scheduling-versions.webp)
+
+<Callout status="info">
+Schedules that fail repeatedly are automatically paused to avoid wasting compute on runs that keep erroring. You can review and re-enable a paused schedule from the scheduling settings.
+</Callout>
+
+### Federated authentication
+
+Scheduled notebooks can use integrations that rely on federated (OAuth) authentication, such as Snowflake and BigQuery OAuth. Scheduled runs authenticate using the OAuth tokens of the user who set up the schedule. Those tokens can expire or be revoked. For reliable, unattended execution, we recommend service account authentication for BigQuery or username-and-password authentication for Snowflake.
+
+### Alerts
+
+You can use the scheduled notebook to periodically check the consistency of your data and use the notification system to alert you when the notebook fails (i.e. the consistency check fails).

@@ -1,0 +1,605 @@
+metadata:
+  createdAt: 2026-01-07T09:34:39.434Z
+  modifiedAt: '2026-01-14T14:08:50.382Z'
+  snapshotHash: sha256:5673bb3a774c11f5e42bcd456d1010836fb1610ab3a7e7cfcdf0264eea9d1247
+project:
+  id: 2251cf35-d19a-4966-94ad-71ca8687fff0
+  initNotebookId: f9903b00-f4e2-47b9-a96d-b98298e346d1
+  integrations: []
+  name: Output tests
+  notebooks:
+    - blocks:
+        - blockGroup: 15e244d3-454f-4c1f-8294-86f374808f8f
+          content: |-
+            # Images, widgets, and charts example
+
+            This notebook tests various rich output types for compatibility across notebook environments.
+          id: d323c5cb-4e70-45f3-a409-52941e5d5a98
+          metadata: {}
+          sortingKey: '0'
+          type: markdown
+          contentHash: sha256:31741ed7babb114abe6329a040eb0731efd48d5c07d8dc2db2941ba86e52901c
+        - blockGroup: e65a004d-2af7-4d97-9e6c-4aa451023c09
+          content: '## Images'
+          id: a7ec335c-100b-43b8-adf7-88893c3bda75
+          metadata: {}
+          sortingKey: '1'
+          type: markdown
+          contentHash: sha256:a543e293c615aa544f0eddfe7c2a5ce1621376987585e646f7a54eb3d6e4a5f6
+        - blockGroup: c3ef1b1b-ee96-4e77-813f-20020a39eeb5
+          content: '### PNG image'
+          id: c7242876-593a-4538-8f86-3d02d5227f5a
+          metadata: {}
+          sortingKey: '2'
+          type: markdown
+          contentHash: sha256:b9d18ec86cd20167e12427a4034ae9bcf64463652f194e23a3b7c735bbf6bd42
+        - blockGroup: bf5d5990-0f9c-4555-b0a8-943cb72a6b7e
+          content: |-
+            import numpy as np
+            import matplotlib.pyplot as plt
+            from IPython.display import display, Image
+            import io
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            x = np.linspace(0, 10, 100)
+            ax.plot(x, np.sin(x), label='sin(x)')
+            ax.plot(x, np.cos(x), label='cos(x)')
+            ax.set_title('PNG Test: Trigonometric Functions')
+            ax.legend()
+            ax.grid(True)
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=100)
+            buf.seek(0)
+            display(Image(data=buf.read(), format='png'))
+            plt.close(fig)
+          id: 59719a09-b9bb-404f-a040-236e4b731711
+          metadata: {}
+          sortingKey: '3'
+          type: code
+          contentHash: sha256:d43dde9494d1ddeec7079199fd2f0e9f75f798cc2a108ad6dad3a11b6133fa40
+        - blockGroup: 432b527f-1eda-405a-a08b-f1636b10d9ea
+          content: '### JPEG image'
+          id: 606b3acb-743e-403f-9324-55c9dd0bb1ee
+          metadata: {}
+          sortingKey: '4'
+          type: markdown
+          contentHash: sha256:2b4cd06020885dd96f5f9f1d6e82d8ee90036506451c9931310cd676847ee392
+        - blockGroup: 0babfa9a-5617-47b8-9599-0874ab389288
+          content: |-
+            fig, ax = plt.subplots(figsize=(6, 4))
+            data = np.random.randn(1000, 2)
+            ax.scatter(data[:, 0], data[:, 1], alpha=0.5, c=data[:, 0], cmap='viridis')
+            ax.set_title('JPEG Test: Scatter Plot')
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='jpeg', dpi=100)
+            buf.seek(0)
+            display(Image(data=buf.read(), format='jpeg'))
+            plt.close(fig)
+          id: dce8bd5b-4bb5-4d45-bb0c-91a5564c8e24
+          metadata: {}
+          sortingKey: '5'
+          type: code
+          contentHash: sha256:c02917eb5e105b8eb833ac0b2e5dd134b06b2a6bb493c3220f7a6610311e9b25
+        - blockGroup: 4f8f2c3d-dd62-46d5-bf2e-be8946be4cd2
+          content: '### GIF image (animated)'
+          id: c92d8221-72c0-4f1a-9ef9-04f70592f928
+          metadata: {}
+          sortingKey: '6'
+          type: markdown
+          contentHash: sha256:55a60a1ebe60a193a0b6cb00d11c5a2abb1eebff58306920f0705356a77112e5
+        - blockGroup: 5135d555-80d5-425e-8471-f249ca360b95
+          content: |-
+            from matplotlib.animation import FuncAnimation
+            from IPython.display import HTML
+
+            fig, ax = plt.subplots(figsize=(5, 5))
+            ax.set_xlim(-1.5, 1.5)
+            ax.set_ylim(-1.5, 1.5)
+            ax.set_aspect('equal')
+            ax.set_title('GIF Test: Rotating Point')
+
+            point, = ax.plot([], [], 'ro', markersize=15)
+            trail, = ax.plot([], [], 'b-', alpha=0.3)
+
+            trail_x, trail_y = [], []
+
+            def init():
+                point.set_data([], [])
+                trail.set_data([], [])
+                return point, trail
+
+            def animate(frame):
+                angle = frame * 0.1
+                x, y = np.cos(angle), np.sin(angle)
+                trail_x.append(x)
+                trail_y.append(y)
+                point.set_data([x], [y])
+                trail.set_data(trail_x[-50:], trail_y[-50:])
+                return point, trail
+
+            anim = FuncAnimation(fig, animate, init_func=init, frames=63, interval=50, blit=True)
+            display(HTML(anim.to_jshtml()))
+            plt.close(fig)
+          id: deea947f-1cba-4d18-a0cf-2022e7b5d5da
+          metadata: {}
+          sortingKey: '7'
+          type: code
+          contentHash: sha256:f6d3fc051f6363054431f56479f17b5be47f20885aad17fe3f4c35d9cc58a7a2
+        - blockGroup: aa2d5339-5b4d-4a79-9b1e-d5cf3747d45e
+          content: '### SVG image'
+          id: 8407faaf-9950-4015-8831-b0f81afc3771
+          metadata: {}
+          sortingKey: '8'
+          type: markdown
+          contentHash: sha256:cc9dc99baec0ae202203581c2a5aed659f9eb550f109c7a572c1503e2dba059c
+        - blockGroup: eb682ab4-f936-49d8-b006-68593fa03f0a
+          content: |-
+            from IPython.display import SVG, display
+
+            svg_content = '''
+            <svg width="300" height="200" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+                  <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+                </linearGradient>
+              </defs>
+              <rect x="10" y="10" width="280" height="180" rx="15" fill="url(#grad1)"/>
+              <text x="150" y="80" font-family="Arial" font-size="20" fill="white" text-anchor="middle">SVG Test</text>
+              <circle cx="100" cy="130" r="25" fill="rgba(255,255,255,0.3)"/>
+              <circle cx="150" cy="130" r="25" fill="rgba(255,255,255,0.5)"/>
+              <circle cx="200" cy="130" r="25" fill="rgba(255,255,255,0.7)"/>
+            </svg>
+            '''
+
+            display(SVG(data=svg_content))
+          id: 74faa855-d202-4b10-aa4b-fc3790914360
+          metadata: {}
+          sortingKey: '9'
+          type: code
+          contentHash: sha256:a2776dad157c2cb772a22c1fadda18c85de68b71f649d5c1ff9c594838ec3df4
+        - blockGroup: 20cb6157-02c2-4fbb-bfea-762af6289ed7
+          content: '## Plotly charts'
+          id: 680d5059-66bc-471b-8413-8988fad8ad8f
+          metadata: {}
+          sortingKey: a
+          type: markdown
+          contentHash: sha256:73b27f898f8d2188b424d9929f57b14ad5a4cab4afda9895df6d0bf77c1fbd88
+        - blockGroup: cc8468bb-2c8a-44d7-9f69-aab5945a9d8f
+          content: '!pip install plotly'
+          id: 3b60458131a9bd21cf96fe5668d39e63
+          metadata: {}
+          sortingKey: a11
+          type: code
+          contentHash: sha256:39fa18f556e51abecace1c0383d305dfefaa138c4f4c407cd372ac59af22870e
+        - blockGroup: 63504848-fb12-4546-935c-de6b0fa22337
+          content: '### Interactive line chart'
+          id: 99dc7e7e-aeff-4662-a8c0-cd3ad4007870
+          metadata: {}
+          sortingKey: b
+          type: markdown
+          contentHash: sha256:d7c2d0fa142b66d0462b944b20d14d7b45715d8cc12e1b1202b1b7f07ca7b4bc
+        - blockGroup: a08b28c3-09e9-4b05-ae31-84e383726dd3
+          content: |-
+            import plotly.express as px
+            import pandas as pd
+
+            df = pd.DataFrame({
+                'x': np.linspace(0, 10, 50),
+                'sin': np.sin(np.linspace(0, 10, 50)),
+                'cos': np.cos(np.linspace(0, 10, 50)),
+                'tan': np.clip(np.tan(np.linspace(0, 10, 50)), -5, 5)
+            })
+
+            fig = px.line(df, x='x', y=['sin', 'cos', 'tan'], 
+                          title='Plotly Test: Interactive Trigonometric Functions')
+            fig.update_layout(hovermode='x unified')
+            fig.show()
+          id: 979cafed-c8d7-4f06-9308-b2aee1f5995d
+          metadata: {}
+          sortingKey: c
+          type: code
+          contentHash: sha256:7852fcc0adf41ebd361349d127b1c7f15286b527f9a44a63e94be79e6dfcf0ba
+        - blockGroup: 06970749-d0cb-4a1b-b26e-e9189207f272
+          content: '### 3D surface plot'
+          id: d72972d3-784a-4e5d-b70e-06eb07aaa559
+          metadata: {}
+          sortingKey: d
+          type: markdown
+          contentHash: sha256:871827048c8e87caf9b8c86dbb96eac6c1347031d59f86e2b67874666e424e73
+        - blockGroup: b6f05e1d-faf6-4211-886f-9940b6082e29
+          content: |-
+            import plotly.graph_objects as go
+
+            x = np.linspace(-5, 5, 50)
+            y = np.linspace(-5, 5, 50)
+            X, Y = np.meshgrid(x, y)
+            Z = np.sin(np.sqrt(X**2 + Y**2))
+
+            fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Viridis')])
+            fig.update_layout(
+                title='Plotly Test: 3D Surface Plot',
+                scene=dict(
+                    xaxis_title='X',
+                    yaxis_title='Y',
+                    zaxis_title='Z'
+                )
+            )
+            fig.show()
+          id: f95e1368-e62d-4a24-97f8-4fcea793e599
+          metadata: {}
+          sortingKey: e
+          type: code
+          contentHash: sha256:92d46ec4ba6697ab04a56d61a0751cef04d55b439f795c2d17f69e762f3b92fe
+        - blockGroup: 9c605b82-c181-4f98-9bc3-8c7a30770b8a
+          content: '### Animated scatter plot'
+          id: 54af1c80-3c14-4171-8423-49b4239cfbad
+          metadata: {}
+          sortingKey: f
+          type: markdown
+          contentHash: sha256:ad78c48a4042044004efa32ee4d7e05768f3c07483e251420181f8bb914cdbe0
+        - blockGroup: 0a60536b-1ede-4efd-a801-2b9e8c9dc3c9
+          content: |-
+            np.random.seed(42)
+            n_points = 50
+            n_frames = 20
+
+            frames_data = []
+            for i in range(n_frames):
+                frames_data.append(pd.DataFrame({
+                    'x': np.random.randn(n_points) + i * 0.1,
+                    'y': np.random.randn(n_points) + np.sin(i * 0.3),
+                    'size': np.random.uniform(10, 30, n_points),
+                    'frame': i
+                }))
+
+            df = pd.concat(frames_data)
+
+            fig = px.scatter(df, x='x', y='y', size='size', animation_frame='frame',
+                             title='Plotly Test: Animated Scatter',
+                             range_x=[-4, 6], range_y=[-4, 4])
+            fig.show()
+          id: 8cafb70c-8e74-4b4a-83cf-0137f8f95acb
+          metadata: {}
+          sortingKey: g
+          type: code
+          contentHash: sha256:942fe1aae59d285e5fd4a8373d8b0e5e4a60816b0bf23729f06edc5dedd8c190
+        - blockGroup: 8b474f04-9a2a-4a38-8aef-e1e4f37454a2
+          content: '## Vega / Vega-Lite visualizations'
+          id: fa3f08ab-daed-4b30-ac32-d7c5eecaa1fd
+          metadata: {}
+          sortingKey: h
+          type: markdown
+          contentHash: sha256:dd04fe7c6b2b9a42a64faefcf39580fb1da8b47eb98e9181fabc41e7071e415f
+        - blockGroup: 2c1697e0-f5c4-4d45-979f-22518eb3d250
+          content: '### Altair bar chart (Vega-Lite)'
+          id: de7ec0d2-801a-46f8-9a9a-9a238a6c9e46
+          metadata: {}
+          sortingKey: i
+          type: markdown
+          contentHash: sha256:fb8e54f0ebfefbaae5a06eb45e9ee54c42cb3faca8839d0a50f44cf3d1465d0c
+        - blockGroup: 8bfe3c03-28a2-49c6-a94a-29bb8d7a1ab3
+          content: |-
+            import altair as alt
+
+            source = pd.DataFrame({
+                'category': ['A', 'B', 'C', 'D', 'E', 'F'],
+                'value': [28, 55, 43, 91, 81, 53]
+            })
+
+            chart = alt.Chart(source).mark_bar().encode(
+                x=alt.X('category:N', title='Category'),
+                y=alt.Y('value:Q', title='Value'),
+                color=alt.Color('category:N', legend=None)
+            ).properties(
+                title='Vega-Lite Test: Bar Chart',
+                width=400,
+                height=300
+            )
+
+            chart
+          id: 883534fb-6adc-4a26-b254-81b6016a5d95
+          metadata: {}
+          sortingKey: j
+          type: code
+          contentHash: sha256:34bd4c2a5f794dcd4b8f290507d9b72d4221fe43dfa8588f917f4b453446d7d8
+        - blockGroup: b4a1b28f-4428-4f6e-932b-6dfbb968cb09
+          content: '### Interactive selection'
+          id: ce3a3c01-8c79-4566-bef0-cee746682c89
+          metadata: {}
+          sortingKey: k
+          type: markdown
+          contentHash: sha256:419d3551ab82e1026b83a4f9ce7519d2eece60d9038a1ef1c15699bae2020f35
+        - blockGroup: f545b17b-7048-45b9-9397-b7cc8ff0f062
+          content: |-
+            np.random.seed(42)
+            source = pd.DataFrame({
+                'x': np.random.randn(100),
+                'y': np.random.randn(100),
+                'category': np.random.choice(['Group A', 'Group B', 'Group C'], 100)
+            })
+
+            selection = alt.selection_point(fields=['category'])
+
+            chart = alt.Chart(source).mark_circle(size=100).encode(
+                x='x:Q',
+                y='y:Q',
+                color=alt.condition(
+                    selection,
+                    alt.Color('category:N'),
+                    alt.value('lightgray')
+                ),
+                tooltip=['x', 'y', 'category']
+            ).properties(
+                title='Vega-Lite Test: Interactive Selection (click legend)',
+                width=400,
+                height=300
+            ).add_params(selection)
+
+            chart
+          id: 0993127d-5d43-483c-993b-e00cddc4dc94
+          metadata: {}
+          sortingKey: l
+          type: code
+          contentHash: sha256:cd8e06988dd486e5b30f4250160a0ff21590f60abfda9fed143456001c5ffce0
+        - blockGroup: d95ec6ee-fe81-43e7-b991-2916ebb9af67
+          content: '### Layered chart with brushing'
+          id: e65bc277-2d4a-4c8f-bb78-c2a01125c990
+          metadata: {}
+          sortingKey: m
+          type: markdown
+          contentHash: sha256:8001870659a78009065dff329ce2046ebd0a1f670434a4a1b37c0c101e00817d
+        - blockGroup: 46d17f30-8f52-4e9b-a6e8-46b727985aaa
+          content: |-
+            np.random.seed(42)
+            dates = pd.date_range('2024-01-01', periods=100, freq='D')
+            source = pd.DataFrame({
+                'date': dates,
+                'price': 100 + np.cumsum(np.random.randn(100))
+            })
+
+            brush = alt.selection_interval(encodings=['x'])
+
+            base = alt.Chart(source).encode(
+                x='date:T',
+                y='price:Q'
+            )
+
+            upper = base.mark_line().encode(
+                x=alt.X('date:T', scale=alt.Scale(domain=brush))
+            ).properties(
+                title='Vega-Lite Test: Brush to Zoom',
+                width=500,
+                height=200
+            )
+
+            lower = base.mark_area(opacity=0.3).properties(
+                height=60,
+                width=500
+            ).add_params(brush)
+
+            upper & lower
+          id: 7dc2b3c5-9e67-43c5-8151-a61de0f9b41a
+          metadata: {}
+          sortingKey: 'n'
+          type: code
+          contentHash: sha256:aff9d3304ef513df64e7bb8b07d80c4158367e80c5035a7a6714a8c22ac8bd4d
+        - blockGroup: 39ecb65e-c011-44c8-b5d0-a6d04f3943c8
+          content: '## IPyWidgets'
+          id: b4018760-0b58-4bd4-a970-b9a478f30fed
+          metadata: {}
+          sortingKey: o
+          type: markdown
+          contentHash: sha256:727a485fcc3dd963288e5756e4e992d3224b0185d8fd95a859ec31a25fed25d3
+        - blockGroup: a386e9fd-56c8-457f-9c63-def98e117433
+          content: '!pip install ipywidgets'
+          id: c482ec33da7864ec9f90aaf8de592eb5
+          metadata: {}
+          sortingKey: a26
+          type: code
+          contentHash: sha256:dc63da84ce0d9a9e0f396ee1c4dfe80f254f7958b7f537bf68efc57f9127c760
+        - blockGroup: c7f66c43-fc7e-4175-b37c-7c0e81d36d6a
+          content: '### Basic widgets'
+          id: b3d34960-d9a4-4cdc-bec6-7306cf3e41db
+          metadata: {}
+          sortingKey: p
+          type: markdown
+          contentHash: sha256:588666f394f872de41fd1fc578b8e2b7ae023a3e3eeedab3a483eb199dd4a120
+        - blockGroup: 925026cd-0c9a-474c-9638-a4a475c5ac88
+          content: |-
+            import ipywidgets as widgets
+            from IPython.display import display
+
+            text_widget = widgets.Text(
+                value='Hello World',
+                placeholder='Type something',
+                description='Text:',
+                disabled=False
+            )
+
+            slider_widget = widgets.IntSlider(
+                value=50,
+                min=0,
+                max=100,
+                step=1,
+                description='Slider:',
+                continuous_update=False
+            )
+
+            dropdown_widget = widgets.Dropdown(
+                options=['Option A', 'Option B', 'Option C'],
+                value='Option A',
+                description='Dropdown:'
+            )
+
+            checkbox_widget = widgets.Checkbox(
+                value=True,
+                description='Checkbox',
+                disabled=False
+            )
+
+            display(widgets.VBox([text_widget, slider_widget, dropdown_widget, checkbox_widget]))
+          id: 7681b333-2734-4b61-b0a5-cfc71f6d08d6
+          metadata: {}
+          sortingKey: q
+          type: code
+          contentHash: sha256:adabc81ea1593e23d229ce98c2bf7752801743d3a93e888b64f4af71871195e0
+        - blockGroup: af74b781-3562-430d-8217-fff01d6e4e2f
+          content: '### Interactive plot with widgets'
+          id: 7ffa1887-a5fb-4b0d-a368-c9f338523d3a
+          metadata: {}
+          sortingKey: r
+          type: markdown
+          contentHash: sha256:60a909b6de4eea515f769b57c2f991e239563e14b7cc340ed2151a9e84ada2ee
+        - blockGroup: b01fc525-1089-48c4-9bd4-aa540bc0356b
+          content: |-
+            from ipywidgets import interact, FloatSlider
+
+            @interact(
+                frequency=FloatSlider(min=0.5, max=5.0, step=0.1, value=1.0, description='Frequency'),
+                amplitude=FloatSlider(min=0.1, max=2.0, step=0.1, value=1.0, description='Amplitude'),
+                phase=FloatSlider(min=0, max=2*np.pi, step=0.1, value=0, description='Phase')
+            )
+            def plot_wave(frequency, amplitude, phase):
+                x = np.linspace(0, 4 * np.pi, 200)
+                y = amplitude * np.sin(frequency * x + phase)
+                
+                fig, ax = plt.subplots(figsize=(8, 4))
+                ax.plot(x, y, 'b-', linewidth=2)
+                ax.set_xlim(0, 4 * np.pi)
+                ax.set_ylim(-2.5, 2.5)
+                ax.set_xlabel('x')
+                ax.set_ylabel('y')
+                ax.set_title(f'IPyWidgets Test: y = {amplitude:.1f} × sin({frequency:.1f}x + {phase:.1f})')
+                ax.grid(True, alpha=0.3)
+                plt.show()
+          id: 9265de07-9cf4-4994-a1bc-3152d32e4e9a
+          metadata: {}
+          sortingKey: s
+          type: code
+          contentHash: sha256:9eee9607bb1344067c2e0831034fdd9eefe820285274187b4eccb39f33ae835b
+        - blockGroup: e724abc5-d97c-49fe-a0d9-a9b79a5c26cb
+          content: '### Button with output'
+          id: 0935ab67-97bd-49f7-bd57-3f0e320d30b6
+          metadata: {}
+          sortingKey: t
+          type: markdown
+          contentHash: sha256:57b174cac050bf317fce132f033ca557f85cece972dbc4c5f453a76409d42919
+        - blockGroup: b35a0c37-6b6a-4fd1-9e12-b70957527a2b
+          content: |-
+            button = widgets.Button(
+                description='Click me!',
+                button_style='primary',
+                icon='check'
+            )
+
+            output = widgets.Output()
+
+            click_count = [0]
+
+            def on_button_click(b):
+                click_count[0] += 1
+                with output:
+                    output.clear_output()
+                    print(f'Button clicked {click_count[0]} time(s)!')
+                    print(f'Random number: {np.random.randint(1, 100)}')
+
+            button.on_click(on_button_click)
+
+            display(widgets.VBox([button, output]))
+          id: b02eb8bd-bfe0-48b1-a8f4-074fbb2503db
+          metadata: {}
+          sortingKey: u
+          type: code
+          contentHash: sha256:30c5e3120692282597a9b5407c3cf2a65ffe2681d70ec476cbfa406cc78f5f98
+        - blockGroup: 1659ef96-74fa-4564-95f8-19642c4db4eb
+          content: '### Progress bar'
+          id: 60353e10-57c3-48f5-aaa9-23898abd34b5
+          metadata: {}
+          sortingKey: v
+          type: markdown
+          contentHash: sha256:9b52ff3ad961602b1a87bc107d5bf990bf0d8bad2ace738a9d2463503983bb7a
+        - blockGroup: c42a9d01-9d8b-49fa-9d2e-b4ac4219cb87
+          content: |-
+            import time
+
+            progress = widgets.IntProgress(
+                value=0,
+                min=0,
+                max=10,
+                description='Loading:',
+                bar_style='info',
+                orientation='horizontal'
+            )
+
+            label = widgets.Label(value='0%')
+
+            display(widgets.HBox([progress, label]))
+
+            for i in range(11):
+                progress.value = i
+                label.value = f'{i * 10}%'
+                time.sleep(0.2)
+
+            progress.bar_style = 'success'
+            label.value = 'Complete!'
+          id: 756bda0e-7967-4698-bf04-69628cc29679
+          metadata: {}
+          sortingKey: w
+          type: code
+          contentHash: sha256:c650b8ba73ffb4827f221e4871bc3a3b4b11968da60d51e8267c8e6b8e9ed0e3
+        - blockGroup: 61d9c76f-1a03-412a-8c2b-5b8c4ab343c7
+          content: '### Tab widget'
+          id: 09f5a932-2dd1-4c77-9e45-6cd5ba0c5092
+          metadata: {}
+          sortingKey: x
+          type: markdown
+          contentHash: sha256:9beba9de4bd2debd487a10b61cb813fc6ec442c02de880dd3df37f221a5088af
+        - blockGroup: e44c0c4d-3999-4b69-8ba1-e7d9817faa8e
+          content: |-
+            tab_contents = [
+                widgets.HTML(value='<h3>Tab 1</h3><p>This is the first tab with HTML content.</p>'),
+                widgets.IntSlider(description='Slider:', value=50),
+                widgets.Textarea(value='Type here...', description='Notes:')
+            ]
+
+            tab = widgets.Tab(children=tab_contents)
+            tab.set_title(0, 'HTML')
+            tab.set_title(1, 'Slider')
+            tab.set_title(2, 'Text')
+
+            display(tab)
+          id: fd7e8eee-4132-4b89-bbb7-bedc280bb52c
+          metadata: {}
+          sortingKey: 'y'
+          type: code
+          contentHash: sha256:011d1952562d93ddd8d7bfd85e5ff70736694f8f1f76e678cb40e37e6f1312e0
+        - blockGroup: 234985f1-21ea-4cb0-81b4-0f67019071bb
+          content: |-
+            ---
+
+            ## Summary
+
+            This notebook tests the following output types:
+
+            | Category | Types Tested |
+            |----------|-------------|
+            | Images | PNG, JPEG, GIF (animated), SVG |
+            | Plotly | Line chart, 3D surface, Animated scatter |
+            | Vega-Lite | Bar chart, Interactive selection, Brushing |
+            | IPyWidgets | Text, Slider, Dropdown, Buttons, Progress, Tabs |
+          id: f1f6037d-4285-4a21-a716-26bc29ae6cc8
+          metadata: {}
+          sortingKey: z
+          type: markdown
+          contentHash: sha256:d57866403666937f4b8c99ca31ed66f75c221ed7de0cd60ce62fe8856fe1abb8
+      executionMode: block
+      id: f9903b00-f4e2-47b9-a96d-b98298e346d1
+      isModule: false
+      name: output_tests
+  settings: {}
+version: 1.0.0

@@ -1,0 +1,625 @@
+import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import type { DeepnoteBlock, DeepnoteFile, InputBlock, InputBlockValueOverride } from '@deepnote/blocks'
+import {
+  createPythonCode,
+  decodeUtf8NoBom,
+  deserializeDeepnoteFile,
+  extractOutputsText,
+  generateSortingKey,
+  getInputBlockValueOverrideValidationError,
+  InvalidValueError,
+  isAgentBlock,
+  isExecutableBlock,
+  isInputBlock,
+} from '@deepnote/blocks'
+import type { IOutput } from '@jupyterlab/nbformat'
+import {
+  type AgentBlockContext,
+  type AgentStreamEvent,
+  executeAgentBlock,
+  serializeNotebookContext,
+} from './agent-handler'
+import { toPythonLiteral } from './javascript'
+import { type ExecutionCallbacks, type ExecutionResult, KernelClient } from './kernel-client'
+import {
+  ExecutionTimeoutError,
+  failureCategoryOf,
+  isRuntimeError,
+  type RuntimeFailureCategory,
+  ServerExitedError,
+} from './runtime-errors'
+import { type ServerInfo, startServer, stopServer } from './server-starter'
+import type { BlockExecutionResult, ExecutionSummary, RuntimeConfig } from './types'
+
+function createErrorOutput(error: Error): IOutput {
+  return {
+    output_type: 'error',
+    ename: error.name || 'Error',
+    evalue: error.message,
+    traceback: [],
+  }
+}
+
+export interface ExecutionOptions {
+  /** Run only the specified notebook (by name) */
+  notebookName?: string
+  /** Run only the specified block (by id) */
+  blockId?: string
+  /** Run only the specified blocks (by ids). Takes precedence over blockId. */
+  blockIds?: string[]
+  /**
+   * Input values to inject before execution.
+   * Keys are variable names, values are the values to assign.
+   * These will be set before any blocks are executed.
+   */
+  inputs?: Record<string, unknown>
+  /** Callback functions (may be async) */
+  onBlockStart?: (block: DeepnoteBlock, index: number, total: number) => void | Promise<void>
+  onBlockDone?: (result: BlockExecutionResult) => void | Promise<void>
+  onOutput?: (blockId: string, output: IOutput) => void
+  onAgentEvent?: (event: AgentStreamEvent) => void | Promise<void>
+  /** Sink for non-fatal warnings emitted during execution (e.g. agent MCP cleanup failures) */
+  onWarning?: (message: string) => void
+  onServerStarting?: () => void
+  onServerReady?: () => void
+  integrations?: Array<{ id: string; name: string; type: string }>
+  /**
+   * Cancels agent blocks only; code and SQL blocks still run to completion.
+   * An aborted agent is reported as a failed block, not as a rejection.
+   */
+  signal?: AbortSignal
+}
+
+export interface ExecutionEngineOptions {
+  /**
+   * Attach to a deepnote-toolkit server that is already running instead of starting one. The
+   * engine starts its own kernel on it and leaves the server running when it stops; the caller
+   * owns the server's lifetime (see `ServerPool`).
+   */
+  server?: ServerInfo
+}
+
+/**
+ * High-level execution engine for running Deepnote projects.
+ *
+ * @example
+ * ```typescript
+ * const engine = new ExecutionEngine({
+ *   pythonEnv: '/path/to/venv',  // or 'python' for system Python
+ *   workingDirectory: '/path/to/project',
+ * })
+ *
+ * await engine.start()
+ * try {
+ *   const summary = await engine.runFile('./project.deepnote')
+ *   console.log(`Executed ${summary.executedBlocks} blocks`)
+ * } finally {
+ *   await engine.stop()
+ * }
+ * ```
+ */
+export class ExecutionEngine {
+  private server: ServerInfo | null = null
+  private kernel: KernelClient | null = null
+  private readonly externalServer: ServerInfo | null
+  private detachServerExit: (() => void) | null = null
+  private stopping = false
+
+  constructor(
+    private readonly config: RuntimeConfig,
+    options: ExecutionEngineOptions = {}
+  ) {
+    this.externalServer = options.server ?? null
+  }
+
+  /**
+   * Get the Jupyter server port (available after start() is called).
+   */
+  get serverPort(): number | null {
+    return this.server?.jupyterPort ?? null
+  }
+
+  /**
+   * Pid of the deepnote-toolkit server process (available after start() is called).
+   */
+  get serverPid(): number | null {
+    return this.server?.process.pid ?? null
+  }
+
+  /**
+   * Start the deepnote-toolkit server (unless one was provided) and connect to the kernel.
+   */
+  async start(): Promise<void> {
+    this.stopping = false
+    const server =
+      this.externalServer ??
+      (await startServer({
+        pythonEnv: this.config.pythonEnv,
+        workingDirectory: this.config.workingDirectory,
+        port: this.config.serverPort,
+        env: this.config.env,
+        startupTimeoutMs: this.config.serverStartupTimeoutMs,
+        onLog: this.config.onServerLog,
+      }))
+    this.server = server
+    this.watchServerExit(server)
+
+    try {
+      this.kernel = new KernelClient()
+      await this.kernel.connect(server.url, { startupTimeoutMs: this.config.kernelStartupTimeoutMs })
+    } catch (error) {
+      await this.stop()
+      throw error
+    }
+  }
+
+  /**
+   * Stop the server (unless it was provided) and disconnect from the kernel.
+   */
+  async stop(): Promise<void> {
+    this.stopping = true
+    this.detachServerExit?.()
+    if (this.kernel) {
+      await this.kernel.disconnect()
+      this.kernel = null
+    }
+    const server = this.server
+    this.server = null
+    if (server && server !== this.externalServer) {
+      await stopServer(server)
+    }
+  }
+
+  /**
+   * A server that exits while a run is in progress would otherwise leave the in-flight execution
+   * waiting for a reply that never comes; fail it (and every later block) with a typed error instead.
+   */
+  private watchServerExit(server: ServerInfo): void {
+    // A removable listener rather than a `.then` on `server.exited`: a pooled server outlives many
+    // engines, and a promise handler per engine would keep every one of them alive until it exits.
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      this.detachServerExit = null
+      if (this.stopping || this.server !== server) return
+      const status = `code=${code}, signal=${signal}`
+      const stderr = server.stderrTail.trim()
+      const detail = stderr ? `\nstderr: ${stderr}` : ''
+      this.kernel?.failPending(
+        new ServerExitedError(
+          `The deepnote-toolkit server process exited while the run was in progress (${status}).${detail}`
+        )
+      )
+    }
+    server.process.once('exit', onExit)
+    this.detachServerExit = () => {
+      server.process.removeListener('exit', onExit)
+      this.detachServerExit = null
+    }
+  }
+
+  /** Runs code on the kernel, applying the configured per-block timeout when there is one. */
+  private executeOnKernel(
+    kernel: KernelClient,
+    code: string,
+    callbacks?: ExecutionCallbacks
+  ): Promise<ExecutionResult> {
+    const timeoutMs = this.config.blockTimeoutMs
+    if (timeoutMs === undefined) {
+      return callbacks ? kernel.execute(code, callbacks) : kernel.execute(code)
+    }
+    return kernel.execute(code, callbacks, { timeoutMs })
+  }
+
+  /**
+   * Run a .deepnote file.
+   */
+  async runFile(filePath: string, options: ExecutionOptions = {}): Promise<ExecutionSummary> {
+    const rawBytes = await readFile(filePath)
+    const content = decodeUtf8NoBom(rawBytes)
+    const file = deserializeDeepnoteFile(content)
+    return this.runProject(file, options)
+  }
+
+  /**
+   * Run a parsed DeepnoteFile.
+   */
+  async runProject(file: DeepnoteFile, options: ExecutionOptions = {}): Promise<ExecutionSummary> {
+    const kernel = this.kernel
+    if (kernel == null) {
+      throw new Error('Engine not started. Call start() first.')
+    }
+
+    const startTime = Date.now()
+    let executedBlocks = 0
+    let failedBlocks = 0
+    let failureCategory: RuntimeFailureCategory | undefined
+
+    // Filter notebooks if specified
+    const notebooks = options.notebookName
+      ? file.project.notebooks.filter(n => n.name === options.notebookName)
+      : file.project.notebooks
+
+    if (options.notebookName && notebooks.length === 0) {
+      throw new Error(`Notebook "${options.notebookName}" not found in project`)
+    }
+
+    // Apply overrides before execution so matching input blocks generate their normal Python assignments.
+    if (options.inputs && Object.keys(options.inputs).length > 0) {
+      await this.injectInputs(options.inputs, notebooks)
+    }
+
+    // Build block ID filter set: blockIds takes precedence over blockId
+    const blockIdFilter = options.blockIds
+      ? new Set(options.blockIds)
+      : options.blockId
+        ? new Set([options.blockId])
+        : null
+
+    // Collect all executable blocks, tracking their notebook and position
+    const allExecutableBlocks: Array<{
+      block: DeepnoteBlock
+      notebookName: string
+      notebookIndex: number
+    }> = []
+    for (const notebook of notebooks) {
+      const sortedBlocks = this.sortBlocks(notebook.blocks)
+      for (const block of sortedBlocks) {
+        if (isExecutableBlock(block)) {
+          if (blockIdFilter && !blockIdFilter.has(block.id)) {
+            continue
+          }
+          allExecutableBlocks.push({
+            block,
+            notebookName: notebook.name,
+            notebookIndex: file.project.notebooks.indexOf(notebook),
+          })
+        }
+      }
+    }
+
+    // Validate blockIds when the filter yields no executable blocks.
+    if (options.blockIds && allExecutableBlocks.length === 0 && options.blockIds.length > 0) {
+      for (const blockId of options.blockIds) {
+        this.assertExecutableBlockExists(blockId, notebooks)
+      }
+    }
+
+    // For error reporting, use the single blockId only when blockIds is not provided.
+    const primaryBlockId = options.blockIds ? undefined : options.blockId
+    if (primaryBlockId && allExecutableBlocks.length === 0) {
+      this.assertExecutableBlockExists(primaryBlockId, notebooks)
+    }
+
+    const totalBlocks = allExecutableBlocks.length
+
+    // Track collected outputs for agent block context
+    const collectedOutputs = new Map<string, { outputs: unknown[]; executionCount: number | null }>()
+
+    // Execute blocks sequentially
+    for (let i = 0; i < allExecutableBlocks.length; i++) {
+      const { block, notebookIndex } = allExecutableBlocks[i]
+      const blockStart = Date.now()
+
+      await options.onBlockStart?.(block, i, totalBlocks)
+
+      try {
+        if (isAgentBlock(block)) {
+          const notebook = file.project.notebooks[notebookIndex]
+          const agentBlockIndex = notebook?.blocks.findIndex(b => b.id === block.id) ?? -1
+          if (!notebook || agentBlockIndex < 0) {
+            throw new Error(`Agent block "${block.id}" not found in notebook`)
+          }
+
+          const notebookContext = serializeNotebookContext(file, notebookIndex, collectedOutputs)
+
+          let agentDeadline: number | undefined
+          const agentController = new AbortController()
+          let insertIndex = agentBlockIndex + 1
+          const blockOutputs: Array<{
+            blockId: string
+            outputs: IOutput[]
+            executionCount: number | null
+            success: boolean
+            failureCategory?: RuntimeFailureCategory
+          }> = []
+
+          const projectMcpServers = file.project.settings?.mcpServers ?? []
+
+          const addAndExecuteCodeBlock = async ({ code }: { code: string }): Promise<string> => {
+            const newBlock: Extract<DeepnoteBlock, { type: 'code' }> = {
+              id: randomUUID().replace(/-/g, ''),
+              blockGroup: randomUUID().replace(/-/g, ''),
+              sortingKey: generateSortingKey(insertIndex),
+              type: 'code',
+              content: code,
+              metadata: {},
+              executionCount: null,
+              outputs: [],
+            }
+
+            notebook.blocks.splice(insertIndex, 0, newBlock)
+            insertIndex++
+
+            try {
+              const result =
+                agentDeadline === undefined
+                  ? await this.executeOnKernel(kernel, code)
+                  : await kernel.execute(code, undefined, { timeoutMs: Math.max(1, agentDeadline - Date.now()) })
+
+              blockOutputs.push({
+                blockId: newBlock.id,
+                outputs: result.outputs,
+                executionCount: result.executionCount,
+                success: result.success,
+              })
+
+              collectedOutputs.set(newBlock.id, {
+                outputs: result.outputs,
+                executionCount: result.executionCount,
+              })
+
+              const outputText = extractOutputsText(result.outputs, { includeTraceback: true }) || '(no output)'
+              return result.success ? `Output:\n${outputText}` : `Execution failed:\n${outputText}`
+            } catch (error) {
+              const executionError = error instanceof Error ? error : new Error(String(error))
+              const errorOutputs: IOutput[] = [createErrorOutput(executionError)]
+
+              blockOutputs.push({
+                blockId: newBlock.id,
+                outputs: errorOutputs,
+                executionCount: null,
+                success: false,
+                failureCategory: failureCategoryOf(executionError),
+              })
+
+              collectedOutputs.set(newBlock.id, { outputs: errorOutputs, executionCount: null })
+
+              if (isRuntimeError(executionError)) {
+                // Tool SDKs can catch rejected tools; abort the loop as well as rejecting the call.
+                agentController.abort(executionError)
+                throw executionError
+              }
+
+              return `Execution error: ${executionError.message}`
+            }
+          }
+
+          const addMarkdownBlock = async ({ content: mdContent }: { content: string }): Promise<string> => {
+            const newBlock: Extract<DeepnoteBlock, { type: 'markdown' }> = {
+              id: randomUUID().replace(/-/g, ''),
+              blockGroup: randomUUID().replace(/-/g, ''),
+              sortingKey: generateSortingKey(insertIndex),
+              type: 'markdown',
+              content: mdContent,
+              metadata: {},
+            }
+
+            notebook.blocks.splice(insertIndex, 0, newBlock)
+            insertIndex++
+
+            return 'Markdown block added.'
+          }
+
+          const agentContext: AgentBlockContext = {
+            mcpServers: projectMcpServers,
+            notebookContext,
+            addAndExecuteCodeBlock,
+            addMarkdownBlock,
+            onAgentEvent: options.onAgentEvent,
+            onWarning: options.onWarning,
+            integrations: options.integrations,
+            signal: options.signal ? AbortSignal.any([options.signal, agentController.signal]) : agentController.signal,
+          }
+
+          const timeoutMs = this.config.blockTimeoutMs
+          let timeout: ReturnType<typeof setTimeout> | undefined
+          if (timeoutMs !== undefined) {
+            agentDeadline = Date.now() + timeoutMs
+            timeout = setTimeout(() => {
+              agentController.abort(new ExecutionTimeoutError(`Agent block execution exceeded ${timeoutMs}ms.`))
+            }, timeoutMs)
+          }
+
+          let agentResult: { finalOutput: string }
+          try {
+            agentResult = await executeAgentBlock(block, agentContext)
+            agentContext.signal?.throwIfAborted()
+          } catch (error) {
+            // Providers may wrap cancellation errors; preserve the runtime timeout category.
+            agentContext.signal?.throwIfAborted()
+            throw error
+          } finally {
+            clearTimeout(timeout)
+            // Always report added blocks — even if the agent threw partway through —
+            // so consumers see completion for blocks that were inserted into the notebook.
+            for (const bo of blockOutputs) {
+              for (const output of bo.outputs) {
+                options.onOutput?.(bo.blockId, output)
+              }
+
+              const addedBlock = notebook.blocks.find(b => b.id === bo.blockId)
+              if (addedBlock) {
+                await options.onBlockDone?.({
+                  blockId: bo.blockId,
+                  blockType: addedBlock.type,
+                  success: bo.success,
+                  outputs: bo.outputs,
+                  executionCount: bo.executionCount,
+                  durationMs: 0,
+                  ...(bo.failureCategory ? { failureCategory: bo.failureCategory } : {}),
+                })
+              }
+            }
+          }
+
+          const blockResult: BlockExecutionResult = {
+            blockId: block.id,
+            blockType: block.type,
+            success: true,
+            outputs: [{ output_type: 'stream', name: 'stdout', text: agentResult.finalOutput }] as IOutput[],
+            executionCount: null,
+            durationMs: Date.now() - blockStart,
+          }
+
+          await options.onBlockDone?.(blockResult)
+          executedBlocks++
+        } else {
+          const code = createPythonCode(block)
+          const result = await this.executeOnKernel(kernel, code, {
+            onOutput: output => options.onOutput?.(block.id, output),
+          })
+
+          collectedOutputs.set(block.id, { outputs: result.outputs, executionCount: result.executionCount })
+
+          const blockResult: BlockExecutionResult = {
+            blockId: block.id,
+            blockType: block.type,
+            success: result.success,
+            outputs: result.outputs,
+            executionCount: result.executionCount,
+            durationMs: Date.now() - blockStart,
+            ...(result.success ? {} : { failureCategory: 'in-block' as const }),
+          }
+
+          await options.onBlockDone?.(blockResult)
+          executedBlocks++
+
+          if (!result.success) {
+            failedBlocks++
+            failureCategory ??= 'in-block'
+            break
+          }
+        }
+      } catch (error) {
+        const executionError = error instanceof Error ? error : new Error(String(error))
+        const category = failureCategoryOf(executionError)
+        failedBlocks++
+        executedBlocks++
+        failureCategory ??= category
+        const blockResult: BlockExecutionResult = {
+          blockId: block.id,
+          blockType: block.type,
+          success: false,
+          outputs: [createErrorOutput(executionError)],
+          executionCount: null,
+          durationMs: Date.now() - blockStart,
+          error: executionError,
+          failureCategory: category,
+        }
+        await options.onBlockDone?.(blockResult)
+        break
+      }
+    }
+
+    return {
+      totalBlocks,
+      executedBlocks,
+      failedBlocks,
+      totalDurationMs: Date.now() - startTime,
+      ...(failureCategory ? { failureCategory } : {}),
+    }
+  }
+
+  /**
+   * Sort blocks by their sortingKey.
+   */
+  private sortBlocks(blocks: DeepnoteBlock[]): DeepnoteBlock[] {
+    return [...blocks].sort((a, b) => a.sortingKey.localeCompare(b.sortingKey))
+  }
+
+  /**
+   * Ensure a requested block exists in the selected notebooks and is executable.
+   */
+  private assertExecutableBlockExists(blockId: string, notebooks: DeepnoteFile['project']['notebooks']): void {
+    for (const notebook of notebooks) {
+      const block = notebook.blocks.find(b => b.id === blockId)
+      if (!block) {
+        continue
+      }
+      if (!isExecutableBlock(block)) {
+        throw new Error(`Block "${blockId}" is not executable (type: ${block.type}).`)
+      }
+      return
+    }
+    throw new Error(`Block "${blockId}" not found in project`)
+  }
+
+  /**
+   * Check if a string is a valid Python identifier.
+   * Python identifiers must start with a letter or underscore,
+   * followed by letters, digits, or underscores.
+   */
+  private isValidPythonIdentifier(name: string): boolean {
+    return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)
+  }
+
+  /**
+   * Inject input values into the kernel before execution.
+   * Names without a matching input block fall back to generic Python literal conversion.
+   */
+  private async injectInputs(
+    inputs: Record<string, unknown>,
+    notebooks: DeepnoteFile['project']['notebooks']
+  ): Promise<void> {
+    if (!this.kernel) {
+      throw new Error('Engine not started. Call start() first.')
+    }
+
+    const assignments: string[] = []
+    for (const [name, value] of Object.entries(inputs)) {
+      const inputBlocks = this.getInputBlocksByName(notebooks, name)
+
+      if (inputBlocks.length > 0) {
+        for (const block of inputBlocks) {
+          const validationError = getInputBlockValueOverrideValidationError(block, value)
+          if (validationError) {
+            throw new InvalidValueError(`Input "${name}" ${validationError}`, { value })
+          }
+        }
+
+        const inputValue = value as InputBlockValueOverride
+        for (const block of inputBlocks) {
+          const metadata = block.metadata as { deepnote_variable_value: InputBlockValueOverride }
+          metadata.deepnote_variable_value = inputValue
+        }
+
+        for (const block of inputBlocks) {
+          assignments.push(createPythonCode(block).trim())
+        }
+        continue
+      }
+
+      // Preserve generic programmatic input injection when no input block exists.
+      if (!this.isValidPythonIdentifier(name)) {
+        throw new Error(`Invalid variable name: "${name}". Must be a valid Python identifier.`)
+      }
+
+      const pythonValue = toPythonLiteral(value)
+      assignments.push(`${name} = ${pythonValue}`)
+    }
+
+    if (assignments.length > 0) {
+      const code = assignments.join('\n')
+      const result = await this.kernel.execute(code)
+      if (!result.success) {
+        const errorOutput = result.outputs.find(o => o.output_type === 'error')
+        const errorMsg = errorOutput && 'evalue' in errorOutput ? String(errorOutput.evalue) : 'Failed to inject inputs'
+        throw new Error(`Failed to set input values: ${errorMsg}`)
+      }
+    }
+  }
+
+  private getInputBlocksByName(notebooks: DeepnoteFile['project']['notebooks'], inputName: string): InputBlock[] {
+    const inputBlocks: InputBlock[] = []
+
+    for (const notebook of notebooks) {
+      for (const block of this.sortBlocks(notebook.blocks)) {
+        if (isInputBlock(block) && block.metadata.deepnote_variable_name === inputName) {
+          inputBlocks.push(block)
+        }
+      }
+    }
+
+    return inputBlocks
+  }
+}

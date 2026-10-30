@@ -1,0 +1,36 @@
+---
+title: Telegram
+noIndex: false
+noContent: false
+---
+
+![Telegram & Deepnote](../assets/docs/SVsS0TITFN05V8eXMgRR.webp)
+
+Telegram is a messaging app with a focus on speed and security. It's fast, simple, and free. You can use Telegram on multiple devices at the same time because it syncs your messages across phones, tablets, and computers. This guide shows you how to use Telegram to send notifications from your Deepnote data workflows, such as machine learning model training updates.
+
+![Telegram notifications](../assets/docs/5NDfLBAT9uSucPOvStPy.webp)
+
+### How to set it up
+
+The first step in integrating Telegram with your Deepnote notebooks is creating a Telegram bot. Luckily, all you need to do is message the `Botfather` (yes, that's the name of the bot that can create bots). Telegram provides [great documentation and examples](https://core.telegram.org/bots) on how to create a bot using the `Botfather`.
+
+Once you've created a bot, you'll need two pieces of information:
+
+1. **`BOT_TOKEN`**: This token allows Telegram to recognize you're authorized to use this bot to send messages.
+2. **`CHAT_ID`**: The ID of the chat you're trying to send your notifications to.
+
+Take a look at [this section](https://core.telegram.org/bots/api#authorizing-your-bot) of Telegram's documentation to find out where to retrieve your `BOT_TOKEN` and `CHAT_ID`. Once you've found them, consider storing both as environment variables in Deepnote for security purposes. [Environment variables in Deepnote](/docs/environment-variables) are encrypted and offer a secure way to store sensitive data.
+
+### How to use
+
+Once you've stored the `BOT_TOKEN` and `CHAT_ID` as environment variables, all that's needed to send messages is a simple function that sends the notification string to you via Telegram's API. Here's an example of what that could look like:
+
+```
+import requests
+import os
+
+def telegram_sendtext(bot_message):
+    send_text = 'https://api.telegram.org/bot' + os.environ["BOT_TOKEN"] + '/sendMessage'
+    response = requests.get(send_text, params={'chat_id': os.environ["CHAT_ID"], 'parse_mode': 'Markdown', 'text': bot_message})
+    return response.json()
+```

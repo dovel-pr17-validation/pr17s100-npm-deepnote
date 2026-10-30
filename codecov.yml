@@ -1,0 +1,14 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 0.05%
+    patch:
+      default:
+        target: 80%
+        threshold: 0.05%
+
+  ignore:
+    - 'packages/convert/src/bin.ts'
+    - 'packages/blocks/index.ts'

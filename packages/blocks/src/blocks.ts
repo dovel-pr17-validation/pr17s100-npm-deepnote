@@ -1,0 +1,1 @@
+export { UnsupportedBlockTypeError } from './errors'
